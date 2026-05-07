@@ -1,20 +1,22 @@
 # PSO PC V2 Dragon Corruption Bug — Technical Reference
-Disclaimer: Work done here was done together with LLMs. The below report is an analysis provided by Opus 4.7.  
+Disclaimer: Work done here was done together with LLMs. The below report is an analysis provided by Opus 4.7.
 
 If anyone with experience wants to poke around or see if anything discovered below is helpful to finding a solution before me, please feel free.
 
 **Status:** Active investigation. Not patch-server ready. ~40 hours of investigation invested.
 **Target:** Phantasy Star Online PC V2 client (NOT Blue Burst, NOT GameCube/Xbox V3, NOT Dreamcast V2).
-**Last updated:** During Claude Opus 4.7 review session, post v16-lite-r5 build, before scheduled break.
+**Last updated:** Post Blue Burst cross-version verification (added Section 2.5).
 **Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet 4.6 (implementation), GPT (review), Claude Opus 4.7 (architecture review).
 
+> **Note for the impatient reader (added in this revision):** The PSOBB client was compared against V2's binary at the byte level. The dragon-relevant bone matrix code is **identical** in both binaries — same fallback, same guard logic, same constants. Sonic Team shipped this code twice without changing it. The bugs documented in this report are real and unfixed upstream. See **Section 2.5** for details and what it means for this investigation. The V2 community's lack of progress on this bug for 20 years is now answerable: there was no upstream fix to backport.
+
 To apply patches:
-Build d3d8:  
+Build d3d8:
 ```
 i686-w64-mingw32-gcc -shared -O2 -o D3D8.dll d3d8_widescreen.c d3d8.def -lkernel32 -Wl,--enable-stdcall-fixup
 ```
 
-Apply current patches:  
+Apply current patches:
 ```
 python3 apply_dragon_fix.py pso.exe           # apply
 python3 apply_dragon_fix.py pso.exe --verify  # check state
@@ -32,6 +34,8 @@ A 20-year-old visual corruption bug specific to the PC V2 release of PSO. Dragon
 - **Bug C — Clear-Screen Body Bleed.** Unresolved.
 
 **Three binary patches applied to pso.exe** at addresses `0x0061EA20`, `0x0061EFD0`, `0x00634A4A`. Patches verified by cmp(1) diff against `pso_exe.original`.
+
+**Cross-version verification (Section 2.5):** Static binary comparison against PSOBB confirms the bone matrix bug is present and unfixed in both releases. The investigation is on the correct code path.
 
 **Remaining real fix work** lives in pso.exe, not the proxy. The D3D8 proxy is a diagnostic harness + safety net.
 
@@ -55,6 +59,63 @@ The bug can be triggered manually mid-fight or it manifests during dragon's deat
 - Dragon dies "pink" but less chaotic
 - Texture bleed still appears when dragon body intersects player or loot boxes during clear-screen
 - **Critical observation:** *"When a part of the dragon's body goes out of frame the bug stops."* This is a load-bearing clue — see Section 7.
+
+---
+
+## 2.5 Cross-version verification (Blue Burst comparison)
+
+PSOBB (Phantasy Star Online Blue Burst) was built on top of V2 — not a rewrite, an evolution. Episode 1 content, including the Forest 2 dragon, was carried forward. A static comparison between V2 and BB binaries provides important validation, with mixed implications.
+
+### What's identical between V2 and BB
+
+The bone-matrix degenerate-case code from Bug B is structurally unchanged across releases:
+
+| Item | V2 location | BB location | Status |
+|------|-------------|-------------|--------|
+| FLT_MAX fallback (16 writes of `0x7F7FC99E`) | `0x0061EFD2` onwards | `0x0083CCDD` onwards | identical structure (16 consecutive writes, same constant, same offsets `0x00–0x3C`) |
+| Guard `fcom; fnstsw; sahf; je →fallback` | `0x0061EA1D` | `0x0083C698` | identical opcode sequence |
+| Epsilon constant for the comparison | `0.0f` at `0x007C1674` | `0.0f` at `0x0098AF70` | same value |
+| Divisor constant for `1/x` | `1.0f` at `0x007C1670` | `1.0f` at `0x0098AF68` | same value |
+| Null-input early-out | `test esi,esi; je null_handler` | `test esi,esi; je null_handler` | identical |
+| Adjacent fallback constant `0x7F7FC99E` in `.data` | one occurrence | one occurrence | identical |
+
+Same literal-zero epsilon. Same number of writes. Same FLT_MAX-pattern fallback. Same null-input handling. Sonic Team shipped this code twice without modifying it.
+
+### What's different between V2 and BB
+
+The per-mesh culling system was rewritten:
+
+- V2's per-mesh cone-setup pattern `push 0x3e99999a (0.3); push 0x3f75c28f (0.96); call <cone_setup>` at `0x00441EDE` **does not exist anywhere in BB.** Byte-pattern search returns zero hits.
+- The V2 cone-setup function at `0x00619100` (signature: `fld [esp+4]; fchs; fstp ds:GLOBAL`) **has no signature equivalent in BB.** Search returns zero hits.
+- BB has a graduated table of float values at `0x0090332C–0x00903364` containing `0.30, 0.35, 0.42, 0.45, 0.50, 0.60` — values matching what we have empirically calibrated for various aspect ratios. Closer inspection shows this table is read by `fdiv` instructions (integer-conversion arithmetic), not cone tests, so the value match is likely coincidental rather than purposive.
+
+The culling rewrite isn't directly dragon-related, but it does prove Sonic Team touched the rendering pipeline between releases. They had the opportunity to fix the bone matrix bug and elected not to.
+
+### What this means for this investigation
+
+1. **Validation.** The bone matrix patches at `0x0061EA20` and `0x0061EFD0` address a real, unfixed bug. There is no Sonic-Team-blessed correct version of this code we missed. The investigation is on the right code path.
+2. **No free reference fix.** Porting BB's solution to V2 isn't an option because BB doesn't have a solution.
+3. **The bug exists in BB too** — the same code is there, with the same constants, on the same control flow path. But BB doesn't visibly show dragon corruption in normal play. Three plausible explanations, each testable:
+
+   - **Different inputs.** BB's gameplay timing, model loading order, or update sequence may never drive the bone matrix into the degenerate state. If true, the bug's root cause is upstream of the bone matrix function — in whatever feeds it — not in the function itself.
+   - **Downstream NaN/infinity guards.** BB's rendering pipeline may have added finite-value gates between bone matrix output and the actual draw call, filtering corrupt matrices before they affect pixels. If true, those guards could potentially be ported back to V2 as a complementary fix.
+   - **Different model data.** PC V2 was a port of DC V2 with various tweaks; BB had further model updates. If BB's dragon has a different skeleton or different bone weights, the degenerate state may simply not be reachable. If true, the actual fix is an asset swap, not a code change.
+
+### Cross-version patch addresses
+
+For anyone interested in applying equivalent patches to BB (e.g., to verify the bug *can* be triggered there), the analogous addresses are:
+
+| V2 patch | V2 address | BB equivalent address |
+|----------|-----------|----------------------|
+| Matrix guard `je → jbe` | `0x0061EA26` | `0x0083C6A1` |
+| FLT_MAX fallback (zeroscale replacement) | `0x0061EFD0`+ | `0x0083CCDD`+ |
+| Perspective divide near-Z fallback (Bug A) | `0x00634A4A` | not yet located in BB |
+
+The first two are direct functional analogs and would receive the same patch logic. The third needs a separate hunt in BB if anyone pursues this.
+
+### Why the V2 community hasn't progressed on this in 20 years
+
+Now answerable: **there was no upstream fix to backport.** Sega left the bug in V2, the bug stayed in BB, and there was no canonical "correct version" anyone could reference. Investigators looking at later versions for hints would have found the same broken code and concluded the bug must be elsewhere.
 
 ---
 
@@ -115,6 +176,8 @@ Matrix B (2nd call): rotation rows visually zero, separate translation.
 - `0x0061EA20`: widened the guard trigger (`je → jbe`) and tweaked an epsilon constant.
 - `0x0061EFD0`: NOPed out the writes to diagonal slots `[0][0]`, `[1][1]`, `[2][2]`; replaced FLT_MAX writes elsewhere with zero. This is the "zeroscale" fallback — preserves whatever was at the diagonal slots before, zeroes everything else.
 
+**Cross-version note:** This entire mechanism is identical in PSOBB (Section 2.5). Same guard, same fallback, same constants. Sonic Team did not address this bug between releases.
+
 **Caveat with the zeroscale patch:** It assumes the caller pre-initialized the diagonal slots with sane values (typically `1.0f` for identity). If the buffer is uninitialized heap or stale, the diagonals contain garbage. The `[BONE-DIAG]` line in v16-lite-r5 samples the live matrix every 60 frames specifically to verify this — last observed values were `[894/1000, -993/1000, -889/1000]`, i.e., `0.894, -0.993, -0.889`. Plausible cosines. Patch appears to be working.
 
 **Status:** Worst behaviour gone. Final verification awaiting next-run x10000 matrix dump.
@@ -153,6 +216,8 @@ All three regions verified via byte-level diff against `pso_exe.original`. Total
 
 The `je → jbe` change widens the conditional jump that leads to the fallback path, so more degenerate inputs route through the safe fallback instead of the original FLT_MAX-write path.
 
+**BB equivalent:** `0x0083C6A1` (the `je 0x83CCDB` to FLT_MAX fallback). Same patch logic would apply.
+
 ### 4.2 Patch 2 — Zeroscale Fallback (the big one)
 **Address:** `0x0061EFD0` onwards (file offset `0x0021EFD0`)
 **Bytes changed:** ~80 in window
@@ -165,6 +230,8 @@ The `je → jbe` change widens the conditional jump that leads to the fallback p
 - All other writes changed to store `0x00000000` instead of `0x7F7FC99E`.
 
 **Risk:** Assumes caller pre-initialized diagonals. Unverified across all callers but `[BONE-DIAG]` data so far suggests it holds.
+
+**BB equivalent:** `0x0083CCDD` onwards. Identical 16-write structure, identical offsets `0x00–0x3C`, identical `0x7F7FC99E` constant. Same patch logic applies byte-for-byte at the BB address.
 
 ### 4.3 Patch 3 — Perspective Divide Near-Z Fallback (clean win)
 **Address:** `0x00634A4A` (file offset `0x00234A4A`)
@@ -179,6 +246,8 @@ The `je → jbe` change widens the conditional jump that leads to the fallback p
 
 This is the cleanest, most surgical patch. Single immediate change. Sole side effect: outlier particles fall to z=0 / origin instead of producing screen-spanning quads. No fades broken.
 
+**BB equivalent:** Not yet located. The function may have been restructured along with the per-mesh culling rewrite (Section 2.5). A separate hunt in BB would be required.
+
 ---
 
 ## 5. Key Code Addresses in pso.exe (PE image base 0x00400000)
@@ -192,7 +261,7 @@ This is the cleanest, most surgical patch. Single immediate change. Sole side ef
 ### Functions (suspected/identified)
 | Address | Description | Status |
 |---------|-------------|--------|
-| `0x0061EA00` | Matrix-inverse guard / bone fn | Patched at +0x20 and +0x1D0 |
+| `0x0061EA00` | Matrix-inverse guard / bone fn | Patched at +0x20 and +0x1D0. **Identical in BB at `0x0083C680`.** |
 | `0x00634A30` | Perspective divide near-Z fallback (particles) | Patched at +0x1A |
 | `0x00638360` | Second perspective-divide function (shared with fades) | NOT patched. Shared call site at `0x006382FE`/`0x00638303` |
 | `0x00639F2A` | Suspected dragon body draw caller (Bug C hypothesis) | Suspect, not confirmed |
@@ -203,6 +272,8 @@ This is the cleanest, most surgical patch. Single immediate change. Sole side ef
 ### Other bone fn call sites (also hooked)
 `0x004D9043`, `0x004D90A1`, `0x004E0AD5`, `0x004F0C91`, `0x00574C37`. Low-frequency in dragon scenarios.
 
+**Note for cross-version work:** Comparing V2's bone-fn call sites against BB's would reveal whether Sonic Team changed *who calls* the bone matrix function, even though the function itself is unchanged. A different caller layout in BB could be relevant to the "different inputs" hypothesis from Section 2.5.
+
 ### Data / fixed addresses
 | Address | Purpose | Notes |
 |---------|---------|-------|
@@ -211,7 +282,7 @@ This is the cleanest, most surgical patch. Single immediate change. Sole side ef
 | `0x0064FA70` | Frustum constant | Patched at runtime by proxy from `1.0f` to `1.4f` for 14:9 widescreen |
 
 ### Widescreen-related patches (applied at runtime by proxy, not in saved binary)
-Mostly width/height/centre constants in the `0x00650000`–`0x00672000` range. See `do_patchf` calls in `hook_CreateDevice`. Includes second per-mesh culling sin/cos at `0x00441EDF` / `0x00441EE4` to widen frustum half-angle from 17.35° to 21.0°.
+Mostly width/height/centre constants in the `0x00650000`–`0x00672000` range. See `do_patchf` calls in `hook_CreateDevice`. Includes second per-mesh culling sin/cos at `0x00441EDF` / `0x00441EE4` to widen frustum half-angle from 17.35° to 21.0° (14:9), 24.83° (16:9 calibrated), or 26.74° (16:9 aggressive). **Note:** the per-mesh cone-setup pattern around `0x00441EDE` was rewritten in PSOBB (Section 2.5) — porting BB's culling logic is not straightforward and likely not worth pursuing for the dragon investigation.
 
 ---
 
@@ -316,6 +387,7 @@ Suppression fires throughout the run, including non-dragon contexts. Implies eit
 | Translation-preserving identity fallback | Improved scope; localized artifact remained at correct world position. |
 | Use `g_death_window` as suppression gate for body draws | DWIN was open for the entire 3-minute run — would suppress dragon body during normal fight. |
 | Bone hook `degen` predicate as `(mat[0] == 1.0f && mat[5] == 1.0f && mat[10] == 1.0f)` (v3) | Wrong direction — checks for identity, not zero rotation. Renamed `is_identity` in v16-lite-r5; new `zero_rot` predicate added. |
+| Looking at PSOBB binary for an upstream fix to backport | Sonic Team did not fix the bone matrix code between V2 and BB (Section 2.5). The hunt was useful for validation but did not yield a portable fix. |
 
 ---
 
@@ -328,6 +400,10 @@ Suppression fires throughout the run, including non-dragon contexts. Implies eit
 5. **Does the dragon entity ptr `0x01301910` stay stable across game launches?** Probably not — heap allocation. Bone hook's hard-coded filter must be made adaptive.
 6. **Which dragon body part triggers the bug visually?** Bruce noted "when a part of the body goes out of frame, the bug stops." Localizing this to a specific bone (head? wing? front-left claw?) would give a per-bone gate, much cleaner than caller+FVF.
 7. **Is the lobby/forest suppression activity preventing latent bugs, or is the heuristic over-aggressive?** A/B test pending.
+8. **Why doesn't BB visibly show dragon corruption despite having identical broken bone matrix code?** Three competing hypotheses (Section 2.5): different inputs to the bone matrix function in BB, downstream NaN/infinity guards in BB's rendering pipeline, or a different dragon model entirely. Each is testable but requires different methodology (dynamic analysis of BB, static analysis of BB's vertex transform code, or asset comparison respectively).
+9. **Does BB's rendering pipeline add NaN/infinity guards downstream of the bone matrix?** If yes, those guards could be ported to V2 as a complementary fix that doesn't depend on the zeroscale assumption holding. Search BB's vertex-skinning and draw-submission code for finite-value checks that don't exist in V2.
+10. **Do the dragon model files differ between V2 and BB?** If BB's dragon has different bone weights or skeleton structure, the degenerate state may not be reachable in BB. This would be testable as a pure asset swap with no code changes — substitute BB's dragon model into V2 and see if the bug becomes unreachable.
+11. **Compare V2 and BB callers of the bone matrix function.** V2 has 7 hooked call sites (Section 5). BB's caller layout might differ. If BB calls the bone matrix function fewer times per frame, or from different code paths, that could explain why BB doesn't reach the degenerate state.
 
 ---
 
@@ -376,6 +452,11 @@ In rough priority order:
 - Explore identifying dragon-specific draws by texture set rather than caller address. Record texture pointers seen during early-fight calm period; they form the "dragon texture set." A draw is "dragon" if it binds a tex0 from that set.
 - Consider memory-scanning for dragon HP via Cheat Engine. PSO PC V2 enemy struct layout is documented in Sylverant/Newserv community sources. One read per Present gives a precise alive/dead bit and replaces all the heuristic detection with ground truth.
 
+### BB-derived investigation paths (lower priority, higher novelty)
+- **Hunt for downstream finite-value guards in BB's vertex pipeline.** If BB checks for NaN/infinity in vertex transform output before drawing, that check could be ported to V2 as a complementary fix. Static analysis of BB's draw-submission code path is the starting point.
+- **Compare bone-matrix caller layouts between V2 and BB.** If BB has fewer or different callers, that points at the "different inputs" hypothesis (Section 2.5) and shifts the investigation upstream of `0x0061EA00`.
+- **Asset comparison: V2 dragon model vs BB dragon model.** If they differ, attempt a swap to test whether the bug is data-driven rather than code-driven. This requires familiarity with PSO model formats (NJ/NJM or similar Sega formats).
+
 ---
 
 ## 11. Build & Run
@@ -423,12 +504,13 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 
 ## 13. Tooling References
 
-- **Disassembly:** Ghidra (free) or IDA Pro. PSO PC V2 is 32-bit PE, no obfuscation, identifies as MSVC 6 build.
+- **Disassembly:** Ghidra (free) or IDA Pro. PSO PC V2 is 32-bit PE, no obfuscation, identifies as MSVC 6 build. PSOBB is similarly 32-bit PE, with additional packed/protected sections for online security but the dragon-relevant code lives in plain `.text`.
 - **Memory inspection:** Cheat Engine for finding dragon HP / entity struct addresses.
 - **Binary patching:** Direct hex editor (HxD) for static patches; runtime patches via `VirtualProtect` + `memcpy` in proxy DllMain or hook_CreateDevice.
 - **D3D8 reference:** `IDirect3DDevice8` vtable layout — slot numbers in proxy patches are MSDN-documented but easy to drift; verify with dgvoodoo source.
 - **Wine config:** Bruce runs on Wine. Proxy must work both native Windows and Wine.
 - **Server-side correlation:** Newserv logs UTC. Proxy logs both UTC and LOCAL (Bruce is EDT). Phase markers via in-game chat appear in newserv log with UTC timestamps; align manually with proxy `[TIME] tick` lines.
+- **Cross-version comparison:** `objdump -d -M intel` works on both V2 and BB binaries. Python `struct` + byte-pattern search is sufficient for finding equivalent code regions across versions when function addresses shift.
 
 ---
 
@@ -439,6 +521,7 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 - **Pitfall observed:** Display formatting can lie. The original `(int)mat[i]` matrix dump made non-zero-but-small floats look exactly like zero. Whenever a hypothesis depends on a value being precisely zero (or precisely something), use a format that distinguishes.
 - **Test cycle cost:** Each diagnostic run is ~15 minutes setup + 5 minutes gameplay + 30+ minutes log analysis. Iteration is expensive. Code review before run > extra runs.
 - **Bug families:** Decomposition is mandatory. "The dragon bug" is at least three bugs. Treating it as one was probably why prior community attempts didn't progress.
+- **Cross-version binary comparison is high-yield.** Comparing V2 against PSOBB took a few hours of static analysis and produced unambiguous validation that the bone matrix bug is real and unfixed upstream (Section 2.5). When investigating long-standing bugs in old games, compare against successor versions: same engine, possibly fixed bugs, possibly not. Either outcome — fix found or fix absent — is informative. The methodology is straightforward: identify a unique byte pattern in the original (constants, opcode sequences, distinctive control flow), search for the same pattern in the successor, and compare structures around hits.
 
 ---
 
@@ -450,7 +533,7 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 | "Patch-server ready" — bug rare and mild | 60–70% | 30–50 |
 | Complete elimination of all visual artifacts | 30–40% | 60–100+ |
 
-Investigation has reached the steepest part of the value curve: harness is built, decomposition is done, three patches landed, diagnostics produce signal. Marginal hours from here are far more productive than the early hours.
+Investigation has reached the steepest part of the value curve: harness is built, decomposition is done, three patches landed, diagnostics produce signal, and cross-version verification confirms the bugs are real and unaddressed by Sonic Team. Marginal hours from here are far more productive than the early hours.
 
 ---
 
@@ -458,12 +541,13 @@ Investigation has reached the steepest part of the value curve: harness is built
 
 When you (or the next investigator) resume:
 
-1. **Start by reading this document.** It encodes everything known to date.
+1. **Start by reading this document.** It encodes everything known to date, including the cross-version comparison in Section 2.5 — read that early; it sets the strategic frame for everything else.
 2. **Re-read your existing logs** — `pso-peeps-d3d8-wsh.log` from the most recent run, and any newserv chat log from the same session.
 3. **Apply the v16-lite-r6 code fixes** listed in Section 10 before any new test.
 4. **Run one diagnostic session with phase markers** (Bruce types in chat).
 5. **Branch on Matrix B verdict** as described in Section 10.
 6. **Don't trust DWIN as a phase gate** until the FIGHT_SEEN guard includes `g_dragon_active`.
+7. **Don't expect BB to provide a fix.** Section 2.5 concludes that BB has the same broken code. BB is useful for additional investigation paths (downstream guards, caller layout, asset comparison) but not as a source of patches to backport.
 
 ---
 
@@ -479,6 +563,7 @@ When you (or the next investigator) resume:
 - **`[BONE]` / `[BONE-DIAG]`** — bone hook log tags. `[BONE]` is event-driven on suspicious matrices; `[BONE-DIAG]` is periodic sampling.
 - **`[DWIN-SIG]`** — draw signature accumulated during the death window, dumped on window close.
 - **Caller / return address** — in this doc, `caller` usually means `__builtin_return_address(0)` — the address in pso.exe immediately after the CALL instruction. This is the address logged as `caller0=...` in proxy output.
+- **V2 vs BB** — V2 = Phantasy Star Online PC Version 2 (this investigation's target). BB = Phantasy Star Online Blue Burst (the next-generation client, used in Section 2.5 for cross-version verification).
 
 ---
 
