@@ -8,6 +8,18 @@ This was about 40 hours of work over a few days and I'm taking a break from it. 
 **Last updated:** During Claude Opus 4.7 review session, post v16-lite-r5 build, before scheduled break.
 **Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet 4.6 (implementation), GPT (review), Claude Opus 4.7 (architecture review).
 
+To apply patches:
+Build d3d8:  
+```
+i686-w64-mingw32-gcc -shared -O2 -o D3D8.dll d3d8_widescreen.c d3d8.def -lkernel32 -Wl,--enable-stdcall-fixup
+```
+
+Apply current patches:  
+```
+python3 apply_dragon_fix_v5.py pso.exe           # apply
+python3 apply_dragon_fix_v5.py pso.exe --verify  # check state
+python3 apply_dragon_fix_v5.py pso.exe --revert  # restore backup
+```
 ---
 
 ## 1. TL;DR
