@@ -16,9 +16,9 @@ i686-w64-mingw32-gcc -shared -O2 -o D3D8.dll d3d8_widescreen.c d3d8.def -lkernel
 
 Apply current patches:  
 ```
-python3 apply_dragon_fix_v5.py pso.exe           # apply
-python3 apply_dragon_fix_v5.py pso.exe --verify  # check state
-python3 apply_dragon_fix_v5.py pso.exe --revert  # restore backup
+python3 apply_dragon_fix.py pso.exe           # apply
+python3 apply_dragon_fix.py pso.exe --verify  # check state
+python3 apply_dragon_fix.py pso.exe --revert  # restore backup
 ```
 ---
 
