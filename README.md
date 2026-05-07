@@ -1,7 +1,7 @@
 # PSO PC V2 Dragon Corruption Bug — Technical Reference
 Disclaimer: Work done here was done together with LLMs. The below report is an analysis provided by Opus 4.7.  
 
-This was about 40 hours of work over a few days and I'm taking a break from it. If anyone wants to poke around or see if anything discovered below is helpful to others finding a solution before me, please feel free.
+This was about 40 hours of work and I'm taking a break from it. If anyone wants to poke around or see if anything discovered below is helpful to others finding a solution before me, please feel free.
 
 **Status:** Active investigation. Not patch-server ready. ~40 hours of investigation invested.
 **Target:** Phantasy Star Online PC V2 client (NOT Blue Burst, NOT GameCube/Xbox V3, NOT Dreamcast V2).
