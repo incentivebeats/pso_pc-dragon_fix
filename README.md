@@ -1,5 +1,6 @@
 # PSO PC V2 Dragon Corruption Bug — Technical Reference
 <img width="1698" height="900" alt="image" src="https://github.com/user-attachments/assets/85e2ea75-bae6-4baa-a399-07e12e43d87e" />  
+  
 **Disclaimer:** This report was prepared by me using LLMs (Sonnet, Opus, and ChatGPT) as research, drafting, review, and code-analysis assistants. I directed the investigation, ran the tests, validated results, and made the technical decisions. My intent is to either figure out a way to get this patched on my own, or have enough information archived that someone else with deeper knowledge can utilize this in the future. 
 
 **Status:** D3D8 matrix-mutation / proxy-layer fix path closed as a structural fix path; proxy retained for Bug A mitigation and diagnostics. pso.exe machine-code analysis/patching is the active phase.  
