@@ -1,5 +1,5 @@
 /*
- * bone_hook.h -- Stateful instrumentation hook for pso.exe 0x61EA00 (v3)
+ * bone_hook.h -- Stateful instrumentation hook for pso.exe 0x61EA00 (v3.3)
  *
  * KEY FINDINGS FROM PREVIOUS RUN:
  *   - All 4506 events: same call site 0x617455, same ptr 01301910, absmax=2000 every frame
@@ -27,6 +27,12 @@
 #define BONE_DELTA_THRESH 500.0f  /* flag if any element jumps by this much */
 #define BONE_ABS_THRESH  10000.0f /* flag if any element exceeds this */
 
+/* v3.2: high-Y ghost-transform suppression toggle.
+ * Default on. Build with -DBONE_SUPPRESS_HIGH_Y=0 to disable for A/B test. */
+#ifndef BONE_SUPPRESS_HIGH_Y
+#define BONE_SUPPRESS_HIGH_Y 1
+#endif
+
 /* ---- per-event log entry ---- */
 typedef struct {
     int    frame;
@@ -50,6 +56,7 @@ typedef struct {
     float  prev_mat[16];
     int    seen;          /* 1 = has a previous snapshot */
     DWORD  hit_count;     /* total calls for this pair */
+    int    last_xyz_frame; /* throttle [BONE-XYZ] per (ptr,caller); -big = never */
 } BoneTracker;
 
 static BoneLogEntry g_bone_log[BONE_LOG_CAP];
@@ -60,6 +67,10 @@ static int          g_bone_tracker_n = 0;
 
 static int  g_bone_hook_active = 0;
 static int  g_bone_stat_frame  = 0;   /* frame of last stat flush */
+static int  g_bone_xyz_frame   = -999999; /* throttle [BONE-XYZ] translation logs */
+static int  g_bone_pre_frame   = -999999; /* v3.3 throttle [BONE-PRE] logs */
+static unsigned int g_high_y_suppressed = 0; /* v3.2 counter */
+static unsigned int g_setxform_highy_seen = 0; /* v3.3 setxform high_y match counter */
 
 typedef DWORD (__attribute__((thiscall)) *BoneFn)(void* self);
 static BoneFn g_real_bone_fn = (BoneFn)0x61EA00;
@@ -84,6 +95,7 @@ static BoneTracker* bone_get_tracker(void* ptr, DWORD caller_ret) {
         BoneTracker* t = &g_bone_trackers[g_bone_tracker_n++];
         t->ptr = ptr; t->caller_ret = caller_ret;
         t->seen = 0; t->hit_count = 0;
+        t->last_xyz_frame = -999999;
         return t;
     }
     return NULL;
@@ -93,6 +105,48 @@ static BoneTracker* bone_get_tracker(void* ptr, DWORD caller_ret) {
 static DWORD __attribute__((thiscall)) hook_bone_fn(void* self) {
     DWORD caller_ret = (DWORD)__builtin_return_address(0);
     void* actual = (self != NULL) ? self : *(void**)BONE_GLOBAL_PTR;
+
+    /* === [BONE-PRE] (v3.3) ==========================================
+     * Inspect *actual BEFORE invoking the real bone function. This
+     * captures whatever state was left in the matrix slot since the
+     * previous call. If high_y suppression actually persisted between
+     * calls, the matrix here should NOT match the high_y signature
+     * (because suppression zeros mat[0..10]; mat[0]==0 fails the gate).
+     *
+     * Cases this catches:
+     *   - matches_pre_high_y=1 -> something restored Matrix 1 between
+     *     calls. Either a separate writer, or the bone fn itself
+     *     re-stamps *actual on entry, or our suppression is being
+     *     undone.
+     *   - matches_pre_high_y=0 with mat[0]==0 -> suppression persisted,
+     *     i.e. nothing else writes *actual between calls. (Doesn't
+     *     prove the renderer used our zeros -- just that the slot
+     *     stayed zeroed.)
+     *
+     * Throttle: 1 per 15 frames + every matches_pre_high_y=1. */
+    if (caller_ret == 0x0061745A && actual != NULL && g_dragon_ptr != NULL
+        && !IsBadReadPtr(actual, 64)) {
+        const float* pre = (const float*)actual;
+        float pre_ty   = pre[13] - 2000.0f; if (pre_ty < 0) pre_ty = -pre_ty;
+        float pre_r0   = pre[0]  - 1.0f;    if (pre_r0 < 0) pre_r0 = -pre_r0;
+        float pre_r5   = pre[5];            if (pre_r5 < 0) pre_r5 = -pre_r5;
+        float pre_r10  = pre[10];           if (pre_r10 < 0) pre_r10 = -pre_r10;
+        int matches_pre_high_y = (pre_ty < 0.5f && pre_r0 < 0.01f
+                                   && pre_r5 < 0.01f && pre_r10 < 0.01f);
+        if (matches_pre_high_y || (g_frame - g_bone_pre_frame) >= 15) {
+            char b[256];
+            wsprintfA(b,
+                "[BONE-PRE] F%05d ptr=%p matches_pre_high_y=%d "
+                "ty=%d/1000 diag=[%d/1000 %d/1000 %d/1000]",
+                g_frame, actual, matches_pre_high_y,
+                (int)(pre[13]*1000.0f),
+                (int)(pre[0]*1000.0f),
+                (int)(pre[5]*1000.0f),
+                (int)(pre[10]*1000.0f));
+            log_f(b);
+            g_bone_pre_frame = g_frame;
+        }
+    }
 
     DWORD fn_eax = g_real_bone_fn(self);
 
@@ -149,9 +203,44 @@ static DWORD __attribute__((thiscall)) hook_bone_fn(void* self) {
                        mat[8]==0.0f && mat[9]==0.0f && mat[10]==0.0f);
     int degen = zero_rot; /* alias for log compat */
 
-    /* Periodic diagonal check for known dragon entity (caller=0x0061745A).
-     * Verifies whether zeroscale patch produces sane diagonals or heap garbage.
-     * Emits [BONE-DIAG] once per 60 frames for that call site. */
+    /* Capture ALL matrices at caller 0x0061745A once Dragon arena is armed
+     * (g_dragon_ptr != NULL). v3.1 broadens the gate so a second/duplicate
+     * ptr at the same call site -- the suspected Matrix-B / stale head-neck --
+     * shows up alongside the locked Dragon body.
+     *
+     * Throttle is per-tracker: each (ptr, caller) pair logs at most every
+     * 15 frames, but zero_rot frames and first-sight of a new ptr always
+     * log immediately. match=1 means actual==g_dragon_ptr (the locked
+     * Dragon body); match=0 means a different ptr that hit 0x0061745A
+     * during the dragon arena.
+     *
+     * tr is set above when actual!=NULL; if BoneTracker capacity is
+     * exhausted (>16 unique pairs), tr is NULL and we log unthrottled
+     * rather than drop, so we'd rather see overflow than miss the bug. */
+    if (caller_ret == 0x0061745A && actual != NULL && g_dragon_ptr != NULL) {
+        int last        = tr ? tr->last_xyz_frame : -999999;
+        int first_sight = (tr && !tr->seen);
+        if ((g_frame - last) >= 15 || zero_rot || first_sight) {
+            float* fm = (float*)actual;
+            char xbuf[256];
+            wsprintfA(xbuf,
+                "[BONE-XYZ] F%05d ptr=%p match=%d zero_rot=%d identity=%d "
+                "tx=%d/1000 ty=%d/1000 tz=%d/1000 "
+                "diag=[%d/1000 %d/1000 %d/1000]",
+                g_frame, actual,
+                (actual == g_dragon_ptr) ? 1 : 0,
+                zero_rot, is_identity,
+                (int)(fm[12] * 1000.0f),
+                (int)(fm[13] * 1000.0f),
+                (int)(fm[14] * 1000.0f),
+                (int)(fm[0] * 1000.0f),
+                (int)(fm[5] * 1000.0f),
+                (int)(fm[10] * 1000.0f));
+            log_f(xbuf);
+            if (tr) tr->last_xyz_frame = g_frame;
+        }
+    }
+
     if (caller_ret == 0x0061745A && actual != NULL && actual == g_dragon_ptr) {
         static int s_last_diag = -60;
         if (g_frame - s_last_diag >= 60) {
@@ -205,6 +294,82 @@ static DWORD __attribute__((thiscall)) hook_bone_fn(void* self) {
         tr->seen = 1;
     }
 
+    /* === HIGH-Y SUPPRESSION (v3.2) =================================
+     * Empirical: bone fn 0x61EA00 alternates two matrices per frame for
+     * the same Dragon ptr at caller 0x0061745A. CSV analysis of the v3.1
+     * capture (4155 paired BONE events) showed:
+     *   - 2074 high_y entries: ty exactly 2000.0,
+     *     rotation [1,0,0 | 0,0,1 | 0,-1,0] (one unique signature)
+     *   - 2081 normal_y entries: the visible Dragon body
+     *   - perfect alternation, exclusively at caller 0x0061745A
+     *
+     * The high_y transform is a parallel "ghost" Dragon at altitude
+     * 2000 whose geometry texture-bleeds into the scene whenever the
+     * camera frustum includes that altitude.
+     *
+     * Suppression: zero the 3x3 rotation/scale block, preserve translation.
+     * Every vertex collapses to (tx, ty, tz). Zero-area triangles do not
+     * render. Translation preserved so any code reading world position
+     * from this matrix sees something sane (no NaN cascades).
+     *
+     * Tolerances loose enough for fp noise, tight enough that Matrix 2
+     * (the visible body, diag ~ (0.737, -0.994, -0.733)) cannot match.
+     *
+     * First 10 suppressions log in full as [HIGHY-SUP] for verification;
+     * after that we just bump g_high_y_suppressed silently. Total dumped
+     * alongside [BONE STAT] every 300 frames.
+     *
+     * To disable: rebuild with -DBONE_SUPPRESS_HIGH_Y=0. */
+#if BONE_SUPPRESS_HIGH_Y
+    if (caller_ret == 0x0061745A && actual != NULL) {
+        float ty_dev  = mat[13] - 2000.0f; if (ty_dev  < 0.0f) ty_dev  = -ty_dev;
+        float r0_dev  = mat[0]  - 1.0f;    if (r0_dev  < 0.0f) r0_dev  = -r0_dev;
+        float r5_abs  = mat[5];            if (r5_abs  < 0.0f) r5_abs  = -r5_abs;
+        float r10_abs = mat[10];           if (r10_abs < 0.0f) r10_abs = -r10_abs;
+        if (ty_dev < 0.5f && r0_dev < 0.01f && r5_abs < 0.01f && r10_abs < 0.01f) {
+            if (g_high_y_suppressed < 10) {
+                char b[256];
+                wsprintfA(b,
+                    "[HIGHY-SUP] F%05d ptr=%p ty=%d/1000 "
+                    "tx=%d/1000 tz=%d/1000 diag=[%d/1000 %d/1000 %d/1000]",
+                    g_frame, actual,
+                    (int)(mat[13]*1000.0f),
+                    (int)(mat[12]*1000.0f),
+                    (int)(mat[14]*1000.0f),
+                    (int)(mat[0]*1000.0f),
+                    (int)(mat[5]*1000.0f),
+                    (int)(mat[10]*1000.0f));
+                log_f(b);
+            }
+            mat[0] = 0.0f; mat[1] = 0.0f; mat[2]  = 0.0f;
+            mat[4] = 0.0f; mat[5] = 0.0f; mat[6]  = 0.0f;
+            mat[8] = 0.0f; mat[9] = 0.0f; mat[10] = 0.0f;
+            g_high_y_suppressed++;
+            /* === [BONE-POST] (v3.3) post-mutation verification ====
+             * Re-read mat[] AFTER the write to confirm it actually
+             * landed. mutation_took=1 means our zeros are at *actual
+             * right now. mutation_took=0 means something is concurrently
+             * writing to this memory and we need to look elsewhere. */
+            if (g_high_y_suppressed <= 10) {
+                int took = (mat[0] == 0.0f && mat[5] == 0.0f && mat[10] == 0.0f
+                            && mat[1] == 0.0f && mat[2] == 0.0f
+                            && mat[4] == 0.0f && mat[6] == 0.0f
+                            && mat[8] == 0.0f && mat[9] == 0.0f);
+                char b[256];
+                wsprintfA(b,
+                    "[BONE-POST] F%05d ptr=%p mutation_took=%d "
+                    "diag=[%d/1000 %d/1000 %d/1000] ty=%d/1000",
+                    g_frame, actual, took,
+                    (int)(mat[0]*1000.0f),
+                    (int)(mat[5]*1000.0f),
+                    (int)(mat[10]*1000.0f),
+                    (int)(mat[13]*1000.0f));
+                log_f(b);
+            }
+        }
+    }
+#endif
+
     return fn_eax;
 }
 
@@ -249,6 +414,14 @@ static void bone_hook_flush(void) {
                 t->caller_ret, t->ptr, t->hit_count);
             log_line(buf);
         }
+#if BONE_SUPPRESS_HIGH_Y
+        wsprintfA(buf, "[BONE STAT] high_y_suppressed_total=%u",
+            g_high_y_suppressed);
+        log_line(buf);
+#endif
+        wsprintfA(buf, "[BONE STAT] setxform_highy_seen_total=%u",
+            g_setxform_highy_seen);
+        log_line(buf);
         g_bone_stat_frame = g_frame;
     }
 }
@@ -283,5 +456,5 @@ static void bone_hook_install(void) {
     }
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
     g_bone_hook_active = 1;
-    log_f("[BONE] hook v3 installed -- delta+abs tracking active");
+    log_f("[BONE] hook v3.3 installed -- v3.2 + BONE-PRE/POST + setxform high_y detector");
 }
