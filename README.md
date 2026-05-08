@@ -4,10 +4,10 @@ Disclaimer: Work done here was done together with LLMs. The below report is an a
 
 If anyone with experience wants to poke around or see if anything discovered below is helpful to finding a solution before me, please feel free.
 
-**Status:** D3D8 / proxy-layer investigation closed (decisive negative result). pso.exe machine-code patching is the active phase.
-**Target:** Phantasy Star Online PC V2 client (NOT Blue Burst, NOT GameCube/Xbox V3, NOT Dreamcast V2).
-**Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning hypothesis confirmed; pso.exe disassembly is next phase.
-**Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet (D3D8 implementation), GPT (review), Claude Opus (architecture review).
+**Status:** D3D8 / proxy-layer investigation closed (decisive negative result). pso.exe machine-code patching is the active phase.  
+**Target:** Phantasy Star Online PC V2 client 
+**Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning hypothesis confirmed; pso.exe disassembly is next phase.  
+**Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet (D3D8 implementation), GPT (review), Claude Opus (architecture review).  
 
 > **Note for the impatient reader (revised post-v3.4):** Two structural conclusions now stand:
 >
