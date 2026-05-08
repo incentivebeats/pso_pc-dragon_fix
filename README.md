@@ -58,7 +58,8 @@ A 20-year-old visual corruption bug specific to the PC V2 release of PSO. Dragon
 ---
 
 ## 2. User-visible symptoms
-
+<img width="3839" height="2160" alt="Screenshot From 2026-05-07 18-17-09" src="https://github.com/user-attachments/assets/346a023d-7779-4d86-9108-5cfaf833590e" />  
+  
 The bug can be triggered manually mid-fight or it manifests during dragon's death sequence.
 
 **Pre-mitigation (original behaviour):**
