@@ -1,11 +1,11 @@
 # PSO PC V2 Dragon Corruption Bug — Technical Reference
 
-Disclaimer: Work done here was done together with LLMs. The below report is an analysis derived from collaboration between Bruce, GPT, Claude Sonnet, and Claude Opus.
+Disclaimer: This report was prepared by Bruce using LLMs as research, drafting, review, and code-analysis assistants. Bruce directed the investigation, ran the tests, validated results, and made the technical decisions. My intent is to either figure out a way to get this patched on my own, or have enough information archived that someone else with deeper knowledge can utilize this in the future.
 
 **Status:** D3D8 matrix-mutation / proxy-layer fix path closed as a structural fix path; proxy retained for Bug A mitigation and diagnostics. pso.exe machine-code analysis/patching is the active phase.  
 **Target:** Phantasy Star Online PC V2 client  
 **Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning path strongly indicated by diagnostics; pso.exe disassembly is the next phase.  
-**Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet (D3D8 implementation), GPT (review), Claude Opus (architecture review).  
+**Investigation lead:** Bruce. LLMs were used as supporting tools for drafting, review, code iteration, and hypothesis checking.  
 
 **Current tested baseline:**
 - `pso.exe` patched with `apply_dragon_fix.py` v5, with patches A/B/C/D applied.
@@ -86,7 +86,7 @@ The bug can be triggered manually mid-fight or it manifests during dragon's deat
 
 ## 2.5 Cross-version verification (Blue Burst comparison)
 
-PSOBB (Phantasy Star Online Blue Burst) was built on top of V2 — not a rewrite, an evolution. Episode 1 content, including the Forest 2 dragon, was carried forward. A static comparison between V2 and BB binaries provides important validation, with mixed implications.
+PSOBB (Phantasy Star Online Blue Burst) is built on top of the V2→V3 codebase; BB is V4. Episode 1 content, including the Forest 2 dragon, was carried forward. A static comparison between V2 and BB binaries provides important validation, with mixed implications.
 
 ### What's identical between V2 and BB
 
@@ -627,8 +627,8 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 
 ## 14. Investigation Methodology Notes
 
-- **Three-way collaboration:** Bruce (drives, runs tests, narrates), Sonnet (writes proxy code), GPT (reviews logs, sanity-checks hypotheses, frames investigation), Opus (architecture-level review on demand).
-- **Pitfall observed:** AI-generated detectors can be confidently wrong in ways that produce clean-looking-but-meaningless logs. The bone_hook v3 `degen` predicate checked for identity rotation when the actual bug was zero rotation — and produced "all clear" output that was misleading until reviewed. *Always check whether the detector can even see the thing it's supposed to detect.*
+- **Working process:** Bruce directed the investigation, ran tests, reviewed results, and made final technical calls. LLMs were used as support tools for drafting code, reviewing logs, checking hypotheses, and organizing findings.
+- **Pitfall observed:** Automatically generated or assistant-drafted detectors can be confidently wrong in ways that produce clean-looking-but-meaningless logs. The bone_hook v3 `degen` predicate checked for identity rotation when the actual bug was zero rotation — and produced "all clear" output that was misleading until reviewed. *Always check whether the detector can even see the thing it's supposed to detect.*
 - **Pitfall observed:** Display formatting can lie. The original `(int)mat[i]` matrix dump made non-zero-but-small floats look exactly like zero, leading to a multi-week mischaracterization of which matrix was degenerate (Section 3.2). Whenever a hypothesis depends on a value being precisely zero (or precisely something), use a format that distinguishes.
 - **Pitfall observed (v3.x):** A working mechanical mutation does not imply a reachable mutation. v3.2's high-Y suppression fired correctly 1888 times, with `mutation_took=1` confirmed in v3.3. The bug was unchanged because the consumer of `*actual` is software-skinning code that runs before our hook's mutation completes. *Before assuming a runtime hook can fix something, instrument the consumer side as well as the producer side.*
 - **Pitfall observed (v3.x):** Coincidence is not causation. The high-Y matrix is suspicious (constant ty=2000, perfect alternation, single static rotation signature) but suppressing it had zero visible effect. Suspicious signals are correlations until proven causal. The methodology to verify causality at runtime is to instrument the consumer of the suspect data, not just the producer.
