@@ -1,43 +1,50 @@
 # PSO PC V2 Dragon Corruption Bug — Technical Reference
-Disclaimer: Work done here was done together with LLMs. The below report is an analysis provided by Opus 4.7.
+
+Disclaimer: Work done here was done together with LLMs. The below report is an analysis derived from collaboration between Bruce, GPT, Claude Sonnet, and Claude Opus.
 
 If anyone with experience wants to poke around or see if anything discovered below is helpful to finding a solution before me, please feel free.
 
-**Status:** Active investigation. Not patch-server ready. ~40 hours of investigation invested.
+**Status:** D3D8 / proxy-layer investigation closed (decisive negative result). pso.exe machine-code patching is the active phase.
 **Target:** Phantasy Star Online PC V2 client (NOT Blue Burst, NOT GameCube/Xbox V3, NOT Dreamcast V2).
-**Last updated:** Post Blue Burst cross-version verification (added Section 2.5).
-**Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet 4.6 (implementation), GPT (review), Claude Opus 4.7 (architecture review).
+**Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning hypothesis confirmed; pso.exe disassembly is next phase.
+**Authors of investigation:** Bruce (DevOps engineer, primary), Claude Sonnet (D3D8 implementation), GPT (review), Claude Opus (architecture review).
 
-> **Note for the impatient reader (added in this revision):** The PSOBB client was compared against V2's binary at the byte level. The dragon-relevant bone matrix code is **identical** in both binaries — same fallback, same guard logic, same constants. Sonic Team shipped this code twice without changing it. The bugs documented in this report are real and unfixed upstream. See **Section 2.5** for details and what it means for this investigation. The V2 community's lack of progress on this bug for 20 years is now answerable: there was no upstream fix to backport.
+> **Note for the impatient reader (revised post-v3.4):** Two structural conclusions now stand:
+>
+> 1. **PSOBB shares V2's broken bone matrix code byte-identically.** Sonic Team did not fix this between releases. There is no upstream fix to backport. (Section 2.5, unchanged.)
+> 2. **The D3D8 / proxy layer cannot fix the visible bug.** PSO V2 software-skins the dragon's bone matrix on the CPU; D3D8 only sees post-skinned vertices. The "high-Y ghost" matrix observed in v3.x is structurally suspicious, but suppressing or mutating it has no visible effect because the matrix never traverses D3D8 SetTransform en route to the GPU. v3.3 confirmed this with three independent diagnostic markers showing zero hits across a full arena run. (New Section 2.6.)
+>
+> The investigation has reached the point where further progress requires reading and patching pso.exe machine code. The D3D8 proxy stays in place as a diagnostic harness and as the housing for Bug A particle suppression (which IS effective at the proxy layer).
 
-To apply patches:
-Build d3d8:
+To apply pso.exe binary patches:
 ```
 i686-w64-mingw32-gcc -shared -O2 -o D3D8.dll d3d8_widescreen.c d3d8.def -lkernel32 -Wl,--enable-stdcall-fixup
 ```
 
-Apply current patches:
 ```
 python3 apply_dragon_fix.py pso.exe           # apply
 python3 apply_dragon_fix.py pso.exe --verify  # check state
-python3 apply_dragon_fix.py pso.exe --revert  # restore backup
+python3 apply_dragon_fix.py pso.exe --revert  # restore from .original backup
 ```
+
 ---
 
 ## 1. TL;DR
 
-A 20-year-old visual corruption bug specific to the PC V2 release of PSO. Dragon (Forest 2 boss) renders with severe texture/geometry corruption in three distinct ways. After ~200 test iterations and three binary patches, the catastrophic forms are largely contained but residual artifacts persist during clear-screen / post-death.
+A 20-year-old visual corruption bug specific to the PC V2 release of PSO. Dragon (Forest 2 boss) renders with severe texture/geometry corruption in three distinct ways. After ~50 hours of investigation across four bone-hook iterations and four binary patches, Bug A is largely contained and Bugs B/C are characterized but not fixed.
 
 **Bug decomposes into three families:**
-- **Bug A — XYZRHW Particle Near-Z Explosion.** Largely contained.
-- **Bug B — Matrix B Degenerate Bone Transform.** Partially mitigated; verification pending.
-- **Bug C — Clear-Screen Body Bleed.** Unresolved.
+- **Bug A — XYZRHW Particle Near-Z Explosion.** Largely contained at the D3D8 proxy layer plus the pso.exe Patch D.
+- **Bug B — Matrix Alternation / High-Y Ghost Transform.** Characterized in detail; runtime suppression confirmed ineffective (Section 7.2). Fix path is now upstream in pso.exe.
+- **Bug C — Clear-Screen Body Bleed.** Unresolved. v3.4 produced a complete catalog of dragon-active draw signatures (Section 7.3) which is the orientation material for pso.exe disassembly.
 
-**Three binary patches applied to pso.exe** at addresses `0x0061EA20`, `0x0061EFD0`, `0x00634A4A`. Patches verified by cmp(1) diff against `pso_exe.original`.
+**Four binary patches applied to pso.exe** at addresses `0x0061EA1D`, `0x0061EA27`, `0x0061EFD2–0x0061F040`, and `0x00634A48`. Patches verified by `apply_dragon_fix.py --verify` and by `cmp(1)` diff against `pso.exe.original`.
 
 **Cross-version verification (Section 2.5):** Static binary comparison against PSOBB confirms the bone matrix bug is present and unfixed in both releases. The investigation is on the correct code path.
 
-**Remaining real fix work** lives in pso.exe, not the proxy. The D3D8 proxy is a diagnostic harness + safety net.
+**D3D8 layer is closed (Section 2.6).** No further runtime-hook fixes are viable. Diagnostics produced an actionable map for pso.exe analysis.
+
+**Remaining real fix work** lives in pso.exe disassembly, not the proxy.
 
 ---
 
@@ -52,13 +59,19 @@ The bug can be triggered manually mid-fight or it manifests during dragon's deat
 - Post-death / clear-screen phase strobes / flashes violently
 - Objects intersecting dragon body show texture bleed
 
-**Post-mitigation (current state, with all three patches + proxy):**
-- Catastrophic strobing largely gone
+**Post-mitigation (current state, with all four binary patches + proxy):**
+- Catastrophic strobing (Bug A) largely gone
 - Bruce can still trigger the bug manually mid-fight by rubbing the player against dragon body and adjusting camera
 - Clear-screen / post-death texture bleed still occurs
 - Dragon dies "pink" but less chaotic
 - Texture bleed still appears when dragon body intersects player or loot boxes during clear-screen
+- Dragon head/neck visibly stays on the ground while the rendered body rises; standing in/near the head causes strobing
 - **Critical observation:** *"When a part of the dragon's body goes out of frame the bug stops."* This is a load-bearing clue — see Section 7.
+
+**Confirmed not improved by:**
+- Zero-rotation suppression of the high-Y matrix at the bone hook (v3.2)
+- Translation-preserving identity fallback for the matrix
+- Any matrix-mutation strategy at the D3D8 proxy layer (Section 2.6)
 
 ---
 
@@ -72,12 +85,11 @@ The bone-matrix degenerate-case code from Bug B is structurally unchanged across
 
 | Item | V2 location | BB location | Status |
 |------|-------------|-------------|--------|
-| FLT_MAX fallback (16 writes of `0x7F7FC99E`) | `0x0061EFD2` onwards | `0x0083CCDD` onwards | identical structure (16 consecutive writes, same constant, same offsets `0x00–0x3C`) |
+| FLT_MAX fallback (16 writes of `0x7F7FC99E`) | `0x0061EFD2` onwards | `0x0083CCDD` onwards | identical structure |
 | Guard `fcom; fnstsw; sahf; je →fallback` | `0x0061EA1D` | `0x0083C698` | identical opcode sequence |
 | Epsilon constant for the comparison | `0.0f` at `0x007C1674` | `0.0f` at `0x0098AF70` | same value |
 | Divisor constant for `1/x` | `1.0f` at `0x007C1670` | `1.0f` at `0x0098AF68` | same value |
 | Null-input early-out | `test esi,esi; je null_handler` | `test esi,esi; je null_handler` | identical |
-| Adjacent fallback constant `0x7F7FC99E` in `.data` | one occurrence | one occurrence | identical |
 
 Same literal-zero epsilon. Same number of writes. Same FLT_MAX-pattern fallback. Same null-input handling. Sonic Team shipped this code twice without modifying it.
 
@@ -85,37 +97,45 @@ Same literal-zero epsilon. Same number of writes. Same FLT_MAX-pattern fallback.
 
 The per-mesh culling system was rewritten:
 
-- V2's per-mesh cone-setup pattern `push 0x3e99999a (0.3); push 0x3f75c28f (0.96); call <cone_setup>` at `0x00441EDE` **does not exist anywhere in BB.** Byte-pattern search returns zero hits.
-- The V2 cone-setup function at `0x00619100` (signature: `fld [esp+4]; fchs; fstp ds:GLOBAL`) **has no signature equivalent in BB.** Search returns zero hits.
-- BB has a graduated table of float values at `0x0090332C–0x00903364` containing `0.30, 0.35, 0.42, 0.45, 0.50, 0.60` — values matching what we have empirically calibrated for various aspect ratios. Closer inspection shows this table is read by `fdiv` instructions (integer-conversion arithmetic), not cone tests, so the value match is likely coincidental rather than purposive.
+- V2's per-mesh cone-setup pattern at `0x00441EDE` does not exist anywhere in BB. Byte-pattern search returns zero hits.
+- The V2 cone-setup function at `0x00619100` has no signature equivalent in BB.
+- BB has a graduated table of float values at `0x0090332C–0x00903364` whose values match what we have empirically calibrated for various aspect ratios. Closer inspection shows this table is read by `fdiv` instructions (integer-conversion arithmetic), not cone tests, so the value match is likely coincidental rather than purposive.
 
 The culling rewrite isn't directly dragon-related, but it does prove Sonic Team touched the rendering pipeline between releases. They had the opportunity to fix the bone matrix bug and elected not to.
 
 ### What this means for this investigation
 
-1. **Validation.** The bone matrix patches at `0x0061EA20` and `0x0061EFD0` address a real, unfixed bug. There is no Sonic-Team-blessed correct version of this code we missed. The investigation is on the right code path.
+1. **Validation.** The bone matrix patches address a real, unfixed bug. There is no Sonic-Team-blessed correct version of this code we missed. The investigation is on the right code path.
 2. **No free reference fix.** Porting BB's solution to V2 isn't an option because BB doesn't have a solution.
-3. **The bug exists in BB too** — the same code is there, with the same constants, on the same control flow path. But BB doesn't visibly show dragon corruption in normal play. Three plausible explanations, each testable:
-
-   - **Different inputs.** BB's gameplay timing, model loading order, or update sequence may never drive the bone matrix into the degenerate state. If true, the bug's root cause is upstream of the bone matrix function — in whatever feeds it — not in the function itself.
-   - **Downstream NaN/infinity guards.** BB's rendering pipeline may have added finite-value gates between bone matrix output and the actual draw call, filtering corrupt matrices before they affect pixels. If true, those guards could potentially be ported back to V2 as a complementary fix.
-   - **Different model data.** PC V2 was a port of DC V2 with various tweaks; BB had further model updates. If BB's dragon has a different skeleton or different bone weights, the degenerate state may simply not be reachable. If true, the actual fix is an asset swap, not a code change.
-
-### Cross-version patch addresses
-
-For anyone interested in applying equivalent patches to BB (e.g., to verify the bug *can* be triggered there), the analogous addresses are:
-
-| V2 patch | V2 address | BB equivalent address |
-|----------|-----------|----------------------|
-| Matrix guard `je → jbe` | `0x0061EA26` | `0x0083C6A1` |
-| FLT_MAX fallback (zeroscale replacement) | `0x0061EFD0`+ | `0x0083CCDD`+ |
-| Perspective divide near-Z fallback (Bug A) | `0x00634A4A` | not yet located in BB |
-
-The first two are direct functional analogs and would receive the same patch logic. The third needs a separate hunt in BB if anyone pursues this.
+3. **The bug exists in BB too** — the same code is there, with the same constants, on the same control flow path. But BB doesn't visibly show dragon corruption in normal play. This implies either (a) different gameplay inputs in BB never drive the matrix into the visible-bad state, (b) BB's rendering pipeline added downstream guards that filter the corrupt output before it affects pixels, or (c) different model/skeleton data in BB makes the bad state unreachable.
 
 ### Why the V2 community hasn't progressed on this in 20 years
 
 Now answerable: **there was no upstream fix to backport.** Sega left the bug in V2, the bug stayed in BB, and there was no canonical "correct version" anyone could reference. Investigators looking at later versions for hints would have found the same broken code and concluded the bug must be elsewhere.
+
+### Status of BB-derived investigation paths
+
+After v3.x, the BB-derived investigation paths (downstream NaN/infinity guards, caller-layout comparison, asset comparison) are de-prioritized but kept on file (Section 9). The reason: v3.x established that the visible bug operates through the *software-skinning vertex pipeline*, not the matrix-output pipeline that BB might have differently-guarded. The "different inputs" hypothesis remains testable but would require dynamic analysis of BB rather than static comparison. None of these paths are an active investigation direction at this time.
+
+---
+
+## 2.6 D3D8 layer endpoint (post-v3.4 conclusion)
+
+**Conclusion:** The D3D8 / proxy layer cannot deliver a fix for the visible Dragon corruption. Matrix mutation at the bone-hook return point is mechanically correct but the renderer never reads from that path.
+
+**Evidence:** Across v3.1 through v3.4 of `bone_hook.h`, the proxy progressively narrowed the set of viable D3D8-layer interventions until only one remained — directly mutating the bone matrix at the return point of `0x61EA00` to suppress the high-Y "ghost" transform. v3.2 implemented this. v3.3 instrumented it with three independent diagnostic markers:
+
+- `[BONE-POST]` confirms our zero-rotation write actually lands in `*actual` (`mutation_took=1` in 100% of fires).
+- `[BONE-PRE]` reads `*actual` at the start of each subsequent bone hook call (`matches_pre_high_y=0` in 100% of fires — nothing is restoring the matrix between calls).
+- `[SETXFORM-HIGHY]` in `hook_SetTransform` watches for any matrix passed to D3D8 in any state matching the high-Y signature. **`setxform_highy_seen_total = 0` across an entire Dragon arena run.**
+
+The third marker is decisive. The high-Y matrix is never submitted to D3D8 SetTransform in any state. PSO V2 inherits Dreamcast-era CPU-vertex-transform conventions: the bone matrix at `*actual` is read by software-skinning code that runs immediately after `0x61EA00` returns. That code transforms vertices on the CPU and writes them into a vertex buffer. D3D8 only sees the post-skinned positions. By the time our hook returns, the relevant work has already happened.
+
+**What this rules out:** any fix that depends on changing the matrix value seen by the renderer. Identity fallback, zero-scale fallback, translation-preserve fallback, off-screen translation, NaN/Inf injection — all of these mutate `*actual` after the consumer has already read it.
+
+**What remains viable at the D3D8 layer:** Bug A particle suppression at `hook_VBUnlock` (the suppression operates on already-rendered XYZRHW vertex buffers, not on the bone path), and diagnostics. The proxy's role is now fixed: house Bug A's mitigation, run as a diagnostic harness for the pso.exe code analysis to come.
+
+**What this implies for the next phase:** A fix must be applied either upstream of `0x61EA00` (preventing the high-Y state from being computed in the first place), or at the consumer side of the matrix (modifying the software skinning code), or by suppressing whichever specific draw call submits the corrupt vertex buffer (Section 10). All three paths require pso.exe disassembly.
 
 ---
 
@@ -131,56 +151,46 @@ Now answerable: **there was no upstream fix to backport.** Sega left the bug in 
 - `vc = 4` (quad)
 - `prim = 5` (triangle strip) → `count = 2`
 - `z = 0`, `rhw ≈ 1.0`
-- Alpha blend on, `srcblend = 5` (SRCALPHA), `destblend = 2` (one minus, written as 2 here — verify D3D8 enum)
+- Alpha blend on, `srcblend = 5` (SRCALPHA), `destblend = 2` (one minus)
 - `zwriteenable = 0`, `lighting = 0`
 - Caller around `0x006405E0`
 
-**Observed bad coordinate samples** (PSO normal screen space is x:0–640, y:0–480):
-```
-x = 5037
-x = -4397
-x = 13597
-x = -27700
-x = -101847    (older run, pre-mitigation)
-```
-
 **Source cause in pso.exe:** Two functions return `65535.0f` as a fallback when view-space Z is too small:
-- `0x00634A30` — patched (see Section 4.3)
+- `0x00634A30` — patched at file offset `0x00634A48` (Patch D, see Section 4)
 - `0x00638360` — NOT patched. Shared with screen-fade rendering. Patching globally broke fades and Forest 2 environmental lighting. Return-address discriminator alone (around `0x006382FE` / `0x00638303`) cannot distinguish fades from particles.
 
-**Mitigation in proxy:** `hook_VBUnlock` scans all XYZRHW vertex buffers and collapses outlier quads to zero area, alpha = 0. Two tiers:
-- `[SUPPRESS]`: hard collapse when `|x|` or `|y|` > 5000.
-- `[SUPPRESS-NEAR]`: collapse when bbox extends beyond `x<-1024`, `x>1664`, `y<-1024`, `y>1504`, or width/height > 1500. Originally log-only (`[NEAR_OUTLIER]`); promoted to suppression in v15.
+**Mitigations stacked:**
+- pso.exe Patch D: 65535.0f → 0.0f at `0x00634A48`. Eliminates one source.
+- Proxy `hook_VBUnlock` suppression: scans XYZRHW buffers for outliers (|x| or |y| > 5000 hard, or bbox beyond 14:9 reasonable bounds) and collapses bad quads to zero area / alpha=0.
 
-**Status:** Catastrophic strobing eliminated. Sub-threshold cases still possible.
+**Status:** Catastrophic strobing eliminated. Sub-threshold cases still possible but rare.
 
 ---
 
-### 3.2 Bug B — Matrix B Degenerate Bone Transform
+### 3.2 Bug B — Matrix Alternation / High-Y Ghost Transform
 
-**Mechanism:** Each frame, the dragon's primary bone matrix function (called from `0x00617455` in pso.exe, returning to `0x0061745A`) fires *twice* on the same matrix pointer (`0x01301910` in the observed session). Two genuinely different matrices result:
+**Important note on naming.** Earlier versions of this document referred to two matrices as "Matrix A" and "Matrix B" using a display format that truncated floats to integer. That display made small fractional rotations *look* like all zeros, which led to the misleading framing "Matrix B has zero rotation and is the corrupt one." After v3.x adopted the `(int)(mat[i]*10000)` dump format, the actual mapping became visible:
 
-```
-Matrix A (1st call): rotation+translation, valid.
-  Last observed: [1,0,0,0 | 0,0,1,0 | 0,-1,0,0 | 67,2000,9,1]
+- **Matrix 1** (formerly "Matrix A") = the **high-Y ghost** transform. Position constant at `(varying tx, 2000.0, varying tz)`. Rotation `[1,0,0 | 0,0,1 | 0,-1,0]` — a clean +90° rotation around X. Suspect for the visible artifact, but **not confirmed causal** as of v3.4.
+- **Matrix 2** (formerly "Matrix B") = the **visible Dragon body** transform. Translation at ground level (`ty ≈ 25`). Rotation a full orthonormal basis with values like `(0.738, -0.994, -0.733)` on the diagonal — these are the small-fractional cosines that the old display format truncated to zero.
 
-Matrix B (2nd call): rotation rows visually zero, separate translation.
-  Last observed: [0,0,0,0 | 0,0,0,0 | 0,0,0,0 | 46,25,49,1]
-```
+The original framing had it backwards: Matrix B (renamed Matrix 2) is the *healthy* body transform; Matrix A (renamed Matrix 1) is the *suspicious* high-Y ghost. The rest of this section uses the new naming.
 
-**Caveat:** Pre-v16-lite-r5, the matrix dump used `(int)mat[i]` integer truncation. Float values in `(-1.0, 1.0)` truncated to `0` for display. So "Matrix B looks all-zero" may mean either (a) genuinely zero rotation, or (b) sub-1.0 fractional rotation that *displays* as zero. **The v16-lite-r5 dump uses `(int)(mat[i]*10000)` — next run resolves this ambiguity.**
+**Mechanism:** Each frame, the dragon's primary bone matrix function (called from `0x00617455` in pso.exe, returning to `0x0061745A`) fires *twice* on the same matrix pointer. Two genuinely different matrices result in alternation. v3.1 captured 2074 high-Y events and 2081 normal-Y events in one run with perfect interleaving — one of each per frame.
 
-**Original pre-patch behaviour:** When the matrix-inverse guard inside `0x0061EA00` failed, the fallback wrote `0x7F7FC99E` (≈ `FLT_MAX`, ~3.39 × 10³⁸) into multiple matrix slots. Vertices transformed by such a matrix project to infinity.
+**High-Y characteristics:**
+- ty = 2000.0 exactly (constant across the entire run)
+- Rotation `[1,0,0 | 0,0,1 | 0,-1,0]` (single unique signature, no animation)
+- Present from the first arena frame (`[BONE-PTR]` capture fires on F01631 with this signature)
+- Absent during ship/lobby/Forest 2 (gated by Dragon entity ptr capture)
 
-**Patches applied (see Section 4):**
-- `0x0061EA20`: widened the guard trigger (`je → jbe`) and tweaked an epsilon constant.
-- `0x0061EFD0`: NOPed out the writes to diagonal slots `[0][0]`, `[1][1]`, `[2][2]`; replaced FLT_MAX writes elsewhere with zero. This is the "zeroscale" fallback — preserves whatever was at the diagonal slots before, zeroes everything else.
+**Original pre-patch behaviour at the matrix-inverse guard inside `0x0061EA00`:** when the guard failed, the fallback wrote `0x7F7FC99E` (≈ FLT_MAX, ~3.39 × 10³⁸) into multiple matrix slots. Vertices transformed by such a matrix project to infinity.
 
-**Cross-version note:** This entire mechanism is identical in PSOBB (Section 2.5). Same guard, same fallback, same constants. Sonic Team did not address this bug between releases.
+**Patches A/B/C in pso.exe** (see Section 4): widen the guard trigger and replace the FLT_MAX fallback with a zero-rotation, position-preserving collapse. These are static binary patches and are applied to the running pso.exe. Their effect is to ensure that *if* the guard fires, the resulting matrix is benign rather than catastrophic. They do not remove the alternation pattern; they only make the worst pre-patch behaviour impossible.
 
-**Caveat with the zeroscale patch:** It assumes the caller pre-initialized the diagonal slots with sane values (typically `1.0f` for identity). If the buffer is uninitialized heap or stale, the diagonals contain garbage. The `[BONE-DIAG]` line in v16-lite-r5 samples the live matrix every 60 frames specifically to verify this — last observed values were `[894/1000, -993/1000, -889/1000]`, i.e., `0.894, -0.993, -0.889`. Plausible cosines. Patch appears to be working.
+**Runtime mitigation attempted (v3.2) and disproved (v3.3):** Suppressing the high-Y matrix at the bone hook return — overwriting `mat[0..10]` with zeros to collapse the rotation block — fired correctly (1888 suppressions in one run) but had no visible effect on the bug. v3.3 instrumented the consumer path and confirmed that `*actual` is consumed by software skinning, not by SetTransform. Section 2.6 has the full evidence.
 
-**Status:** Worst behaviour gone. Final verification awaiting next-run x10000 matrix dump.
+**Status:** Pre-patch catastrophic FLT_MAX behaviour eliminated. High-Y alternation pattern fully characterized. Causal relationship between high-Y matrix and visible artifact is **suspected but not confirmed**. The fix is now an upstream-of-`0x61EA00` problem — find what state at the call site decides to compute the high-Y transform, and either suppress that state or short-circuit the call.
 
 ---
 
@@ -193,60 +203,75 @@ Matrix B (2nd call): rotation rows visually zero, separate translation.
 - **Render-state leakage** — pso.exe sets a state for dragon death rendering and never restores it.
 - **The "pink" is intentional** death-dissolve material that *looks* corrupt because depth state from earlier in the frame is already broken.
 
-**Discriminator test:** Force a `D3DCLEAR_ZBUFFER` immediately before the suspected body draw. If bleed disappears, Z-pollution is the cause. If not, eliminate that hypothesis.
+**Discriminator test:** Force a `D3DCLEAR_ZBUFFER` immediately before the suspected body draw. If bleed disappears, Z-pollution is the cause.
 
-**Status:** Unresolved. Awaiting clean DWIN-SIG capture (with `last_frame` field, added in v16-lite-r5) to identify which draw signatures fire *only* during the visible bleed window.
+**v3.4 produced a draw-call catalog for this investigation** (Section 7.3). Top callers seen during the death window across one run, ordered by hit count: `0x00637A90` (196), `0x006405E0` (122), `0x00639F2A` (19), `0x0063691F` (4), `0x00637BC0` (2), `0x0063694B` (1). The lower-frequency UP callers (`0x0063691F` and `0x0063694B`) are particularly interesting because `DrawPrimitiveUP` traffic is unusual and suggests one-off submissions like overlay quads or special-case death effects. These are the addresses to anchor on when reading pso.exe.
+
+**Status:** Unresolved. Awaiting pso.exe analysis around the v3.4 callers.
 
 ---
 
 ## 4. Binary Patches Applied to pso.exe
 
-All three regions verified via byte-level diff against `pso_exe.original`. Total 88 byte differences across three regions in `.text` section.
+Four patches applied via `apply_dragon_fix.py` (currently v5). All four verified by `apply_dragon_fix.py --verify` and by `cmp(1)` diff against `pso.exe.original`.
 
-### 4.1 Patch 1 — Matrix Guard Widening
-**Address:** `0x0061EA20` (file offset `0x0021EA20`)
-**Bytes changed:** 4 of 16 in window
-**Purpose:** Widen guard trigger and tweak epsilon comparison.
+### 4.A — fcomps comparison redirect
+**Address:** `0x0061EA1D`
+**Bytes changed:** 4 of 6 in window
+**Original:** `D8 1D 74 16 7C 00` (`fcom dword ptr [0x007C1674]`, comparing against literal `0.0f`)
+**Patched:** `D8 1D F0 D4 64 00` (`fcom dword ptr [0x0064D4F0]`, comparing against `0.5f`)
 
-| Offset (VA) | Original | Patched | Meaning |
-|-------------|----------|---------|---------|
-| 0x0061EA20 | `16` | `D4` | Low byte of 16-bit immediate in prior instruction |
-| 0x0061EA21 | `7C` | `64` | High byte (`0x7C16` → `0x64D4`, ~80% of original threshold) |
-| 0x0061EA27 | `84` | `86` | `0F 84 → 0F 86` (`JE rel32` → `JBE rel32`) |
+Redirects the matrix-inverse guard's epsilon comparison to a non-zero threshold. Combined with Patch B, this widens the set of inputs that route through the safe fallback rather than the original FLT_MAX path.
 
-The `je → jbe` change widens the conditional jump that leads to the fallback path, so more degenerate inputs route through the safe fallback instead of the original FLT_MAX-write path.
+### 4.B — Conditional branch widening
+**Address:** `0x0061EA27`
+**Bytes changed:** 1
+**Original:** `0F 84 ...` (`je rel32`)
+**Patched:** `0F 86 ...` (`jbe rel32`)
 
-**BB equivalent:** `0x0083C6A1` (the `je 0x83CCDB` to FLT_MAX fallback). Same patch logic would apply.
+`je → jbe` widens the conditional jump, routing more degenerate inputs through the fallback path.
 
-### 4.2 Patch 2 — Zeroscale Fallback (the big one)
-**Address:** `0x0061EFD0` onwards (file offset `0x0021EFD0`)
-**Bytes changed:** ~80 in window
-**Purpose:** Replace FLT_MAX-fill matrix fallback with zeroscale (preserve diagonals, zero everything else).
+### 4.C — Degenerate bone fallback (the big one)
+**Address:** `0x0061EFD2` through `0x0061F040` (16 instruction window)
+**Purpose:** Replace FLT_MAX-fill matrix fallback with a position-preserving zero-rotation collapse.
 
-**Original behaviour:** A series of `MOV [esi+offset], 0x7F7FC99E` instructions filled the matrix at offsets `0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, ...` with values close to FLT_MAX.
+**Original behaviour:** A series of 16 `mov dword ptr [esi+offset], 0x7F7FC99E` instructions filled the 4×4 matrix at all offsets `0x00, 0x04, ..., 0x3C` with values close to FLT_MAX.
 
-**Patched behaviour:**
-- Writes at offsets `0x00`, `0x14`, `0x28` are NOPed out (these are the diagonal slots `[0][0]`, `[1][1]`, `[2][2]` of a row-major 4×4 matrix).
-- All other writes changed to store `0x00000000` instead of `0x7F7FC99E`.
+**Patched behaviour (v5 of `apply_dragon_fix.py`):**
+- **Slots `[0][0]`, `[1][1]`, `[2][2]`** (rotation diagonal, offsets `0x00 / 0x14 / 0x28`): write `0.0f`. **(Earlier v4 wrote `1.0f` here, which produced an identity-rotation fallback that left the bad component visibly "alive at world position." v5 zeroes the diagonal so the rotation 3×3 is fully zero; collapsed to a single point.)**
+- **All other rotation slots** (`0x04, 0x08, 0x0C, 0x10, 0x18, 0x1C, 0x20, 0x24, 0x2C`): write `0.0f`.
+- **Translation slots `tx / ty / tz`** (offsets `0x30 / 0x34 / 0x38`): NOPed out. **(Earlier versions wrote `0.0f` to these. That sent the collapsed mesh to world origin, exposing the inner skin mesh below the arena floor. NOPing preserves whatever the caller had at those slots — the Dragon's actual world position.)**
+- **`[3][3]` homogeneous w slot** (offset `0x3C`): write `1.0f`.
 
-**Risk:** Assumes caller pre-initialized diagonals. Unverified across all callers but `[BONE-DIAG]` data so far suggests it holds.
+**Net fallback output:** `[0,0,0,0 | 0,0,0,0 | 0,0,0,0 | tx,ty,tz,1]`. All vertices collapse to the Dragon's world position. Zero-area triangles, no visible render. The Dragon's actual body (Matrix 2) renders normally; the corrupt component (when the guard fires) becomes invisible without dragging position to origin.
 
-**BB equivalent:** `0x0083CCDD` onwards. Identical 16-write structure, identical offsets `0x00–0x3C`, identical `0x7F7FC99E` constant. Same patch logic applies byte-for-byte at the BB address.
+**Risk:** This patch and Patch A/B together assume the guard triggers correctly identify "this matrix is about to be bad." If the guard misses some bad cases or false-positives on good ones, behavior diverges. Empirically, with all four patches applied, the catastrophic FLT_MAX strobing is gone and the residual bug appears unrelated to this fallback path.
 
-### 4.3 Patch 3 — Perspective Divide Near-Z Fallback (clean win)
-**Address:** `0x00634A4A` (file offset `0x00234A4A`)
-**Bytes changed:** 4 in window
-**Purpose:** Change `65535.0f` fallback to `0.0f` when view-space Z is near zero.
+**BB equivalent:** `0x0083CCDD` onwards. Identical 16-write structure, identical offsets, identical `0x7F7FC99E` constant. Same patch logic applies byte-for-byte at the BB address.
 
-| Offset (VA) | Original | Patched |
-|-------------|----------|---------|
-| 0x00634A4A | `00 FF 7F 47` | `00 00 00 00` |
+### 4.D — Perspective divide near-Z fallback (clean win)
+**Address:** `0x00634A48`
+**Bytes changed:** 4
+**Original:** `00 FF 7F 47` (`0x477FFF00` = `65535.0f`)
+**Patched:** `00 00 00 00` (`0.0f`)
 
-`0x477FFF00` (= 65535.0f as IEEE 754) → `0x00000000` (= 0.0f).
+Single-immediate change. When perspective divide hits view-space Z near zero, instead of returning a screen-spanning scale of 65535, returns 0. Collapses outlier particles to z=0 / origin. No fades broken (this address is on a different code path than the shared fade/particle function at `0x00638360`).
 
-This is the cleanest, most surgical patch. Single immediate change. Sole side effect: outlier particles fall to z=0 / origin instead of producing screen-spanning quads. No fades broken.
+**BB equivalent:** Not yet located. The corresponding function may have been restructured along with the per-mesh culling rewrite (Section 2.5). A separate hunt in BB would be required.
 
-**BB equivalent:** Not yet located. The function may have been restructured along with the per-mesh culling rewrite (Section 2.5). A separate hunt in BB would be required.
+### Verification
+
+```bash
+$ python3 apply_dragon_fix.py pso.exe --verify
+Status       Label
+------------------------------------------------------------
+  PATCHED    A: fcomps redirect [0x7C1674]=0.0 -> [0x64D4F0]=0.5
+  PATCHED    B: je -> jbe (0x61EA27)
+  PATCHED    C[esi    ]=zero    # ... 16 entries ...
+  PATCHED    D: near-z scale 65535.0f -> 0.0f (0x634A48)
+
+STATE: fully patched
+```
 
 ---
 
@@ -261,41 +286,56 @@ This is the cleanest, most surgical patch. Single immediate change. Sole side ef
 ### Functions (suspected/identified)
 | Address | Description | Status |
 |---------|-------------|--------|
-| `0x0061EA00` | Matrix-inverse guard / bone fn | Patched at +0x20 and +0x1D0. **Identical in BB at `0x0083C680`.** |
-| `0x00634A30` | Perspective divide near-Z fallback (particles) | Patched at +0x1A |
+| `0x0061EA00` | Matrix-inverse guard / bone fn (called from 7 sites; primary at `0x00617455`) | Patched at +0x1D, +0x27, +0x1D2..+0x240. **Identical in BB at `0x0083C680`.** |
+| `0x00634A30` | Perspective divide near-Z fallback (particles) | Patched at +0x18 |
 | `0x00638360` | Second perspective-divide function (shared with fades) | NOT patched. Shared call site at `0x006382FE`/`0x00638303` |
-| `0x00639F2A` | Suspected dragon body draw caller (Bug C hypothesis) | Suspect, not confirmed |
-| `0x006405E0` | Suspected XYZRHW particle draw caller (Bug A) | Suspect |
-| `0x00617455` | Bone fn call site (returns to `0x0061745A`) | Hooked. Fires for ALL boned entities, not dragon-exclusive |
-| `0x00617535` | Bone fn call site (returns to `0x0061753A`) | Hooked. Lower frequency |
+| `0x00619100` | V2 cone-setup function (per-mesh culling) | Not present in BB (Section 2.5) |
+| `0x00617455` | Bone fn call site (returns to `0x0061745A`) | Hooked. PRIMARY Dragon caller |
+| `0x00617535` | Bone fn call site (returns to `0x0061753A`) | Hooked. Lower frequency, different render flow |
 
 ### Other bone fn call sites (also hooked)
 `0x004D9043`, `0x004D90A1`, `0x004E0AD5`, `0x004F0C91`, `0x00574C37`. Low-frequency in dragon scenarios.
 
-**Note for cross-version work:** Comparing V2's bone-fn call sites against BB's would reveal whether Sonic Team changed *who calls* the bone matrix function, even though the function itself is unchanged. A different caller layout in BB could be relevant to the "different inputs" hypothesis from Section 2.5.
+### Dragon-active draw callers (v3.4 catalog)
+These are the addresses observed submitting draws while `g_dragon_active==1` (Dragon entity bone hook firing). Across one v3.4 run, 128 unique `[DRAGON-SIG]` entries were captured. The 6 dominant callers from `[DWIN-SIG]` (death-window subset) ranked by hit count:
+
+| Address | Hits (death window) | Draw type | Notes |
+|---------|---------------------|-----------|-------|
+| `0x00637A90` | 196 | DP (high frequency) | Highest-volume death-window caller. Strong candidate for body draws or persistent particle systems |
+| `0x006405E0` | 122 | DP | Already in our notes as suspected XYZRHW particle caller (Bug A vertex signature). High death-window count suggests overlap with death effects |
+| `0x00639F2A` | 19 | DP | Suspected dragon body draw caller. Lower count than expected; worth re-examining |
+| `0x0063691F` | 4 | UP (DrawPrimitiveUP) | Low frequency. UP traffic is unusual; possible overlay/UI element or death-fade quad |
+| `0x00637BC0` | 2 | DP | Very low count, dominantly clear-screen-phase |
+| `0x0063694B` | 1 | UP | Single-fire. Possible one-off quad |
+
+These addresses are the primary anchor points for pso.exe disassembly in the next phase.
 
 ### Data / fixed addresses
 | Address | Purpose | Notes |
 |---------|---------|-------|
 | `0x007BB7E0` | `BONE_GLOBAL_PTR` fallback | Used when bone hook receives `self == NULL` |
-| `0x01301910` | Dragon entity matrix ptr (one observed session) | **NOT stable across game launches.** Heap allocation; address depends on session state. Currently hard-coded in bone_hook.h dragon-active filter — must be made adaptive. |
+| Dragon entity ptr | Dynamic | **Captured at runtime** by bone hook (first ptr at caller `0x0061745A` with `|ty| > 1000`, post-frame-2700). Heap address — varies across launches. Most recent observed value `0x01301910` but this is session-specific and not relied upon |
+| `0x0064D4F0` | `0.5f` constant | Used by Patch A as new comparison threshold |
+| `0x007C1674` | `0.0f` constant | Original (pre-patch) Patch A comparison threshold |
+| `0x007C1670` | `1.0f` constant | Divisor for matrix inverse |
 | `0x0064FA70` | Frustum constant | Patched at runtime by proxy from `1.0f` to `1.4f` for 14:9 widescreen |
 
 ### Widescreen-related patches (applied at runtime by proxy, not in saved binary)
-Mostly width/height/centre constants in the `0x00650000`–`0x00672000` range. See `do_patchf` calls in `hook_CreateDevice`. Includes second per-mesh culling sin/cos at `0x00441EDF` / `0x00441EE4` to widen frustum half-angle from 17.35° to 21.0° (14:9), 24.83° (16:9 calibrated), or 26.74° (16:9 aggressive). **Note:** the per-mesh cone-setup pattern around `0x00441EDE` was rewritten in PSOBB (Section 2.5) — porting BB's culling logic is not straightforward and likely not worth pursuing for the dragon investigation.
+Mostly width/height/centre constants in the `0x00650000`–`0x00672000` range. See `do_patchf` calls in `hook_CreateDevice`. Includes second per-mesh culling sin/cos at `0x00441EDF` / `0x00441EE4` to widen frustum half-angle from 17.35° to 21.0° (14:9), 24.83° (16:9 calibrated), or 26.74° (16:9 aggressive).
 
 ---
 
-## 6. D3D8 Proxy Architecture (current build: v16-lite-r5)
+## 6. D3D8 Proxy Architecture (current build: v16-lite-r9-v3.4)
 
 ### File layout
 ```
-pso.exe                       ← patched binary (3 binary patches applied)
-pso_exe.original              ← unpatched reference (for diff)
+pso.exe                       ← patched binary (4 binary patches applied)
+pso.exe.original              ← unpatched reference (backup created on first apply)
 D3D8.dll                      ← built from d3d8_widescreen.c (this proxy)
 D3D8_dgvoodoo.dll             ← dgvoodoo D3D8→D3D9/11 wrapper
 widescreen_res.cfg            ← INI config for resolution + diagnostics
 pso-peeps-d3d8-wsh.log        ← output log, wiped on each launch
+apply_dragon_fix.py           ← pso.exe binary patcher (v5)
 ```
 
 ### Hooks installed (vtable patching)
@@ -304,14 +344,14 @@ pso-peeps-d3d8-wsh.log        ← output log, wiped on each launch
 - IDirect3DVertexBuffer8 vtable: slots 11 (Lock), 12 (Unlock) — patched on first use of any VB
 
 ### Bone hooks (direct CALL-site rewriting in pso.exe)
-Seven 5-byte CALL instruction sites are rewritten in-place to redirect to `hook_bone_fn`. Original target (`0x0061EA00`) is preserved as `g_real_bone_fn` and called from inside the hook.
+Seven 5-byte CALL instruction sites are rewritten in-place to redirect to `hook_bone_fn`. Original target (`0x0061EA00`) is preserved as `g_real_bone_fn` and called from inside the hook. The hook fires for ALL boned entities, not dragon-exclusive — Dragon is identified by dynamic ptr capture (caller `0x0061745A` + `|ty|>1000` at post-2700-frame).
 
 ### Logging
 - 128 KB ring buffer in memory.
 - Single `WriteFile` per `Present` (no per-call file I/O).
 - Timestamps logged every 60 frames in both UTC and LOCAL (UTC is required for newserv chat correlation since Bruce is EDT/UTC-4 but server logs UTC).
 
-### Suppression flow (hook_VBUnlock)
+### Suppression flow (hook_VBUnlock — Bug A)
 1. Reads from VB shadow buffer.
 2. Scans for any vertex with `|x|` or `|y|` > 5000 → logs `[OUTLIER]`.
 3. If `FVF == 0x0144` and `stride == 28`, processes per-quad:
@@ -321,59 +361,104 @@ Seven 5-byte CALL instruction sites are rewritten in-place to redirect to `hook_
 4. Tracks per-frame suppress count and unique tex0 set for DWIN state machine.
 5. Calls `correct_xyzrhw` for widescreen X/Y correction (orthogonal to suppression).
 
+### Bone hook diagnostics (v3.4)
+Multiple log markers, all gated to keep volume manageable:
+
+| Marker | When emitted | Purpose |
+|--------|--------------|---------|
+| `[BONE]` | Suspicious matrix events (NaN/Inf, large delta, JUMP, FIRST sight) | Per-event matrix dump in `(int)(mat[i]*10000)` format |
+| `[BONE-DIAG]` | Periodic (every 60 frames) when `actual==g_dragon_ptr` | Sample diagonal values to verify zeroscale patch produces sane matrix |
+| `[BONE-PRE]` | Top of `hook_bone_fn` when in Dragon arena | State of `*actual` at hook entry. `matches_pre_high_y` flag |
+| `[BONE-POST]` | After mutation (when suppression toggled on) | Verify mutation actually wrote to memory |
+| `[BONE-PTR]` | Once per session | Dynamic Dragon ptr capture announcement |
+| `[BONE-XYZ]` | Throttled (≥15 frames, +zero_rot, +new ptr) | Compact tx/ty/tz log per Dragon-armed bone fire |
+| `[HIGHY-SEEN]` | When suppression OFF | Identifies high-Y matrix instances without mutation. Used in v3.4 |
+| `[HIGHY-SUP]` | When suppression ON | Used in v3.2/v3.3 testing. First 10 fires log full detail |
+| `[SETXFORM-HIGHY]` | hook_SetTransform sees a matrix matching the high-Y signature | Decisive marker — **always 0 across full Dragon arena**, confirms software skinning |
+| `[BONE STAT]` | Every 300 frames | Per-tracker hit counts; suppression and SetTransform-HighY totals |
+
+### Dragon-active draw correlation (v3.4)
+- `[DRAGON-SIG] new ...` fires once per unique draw signature seen during `g_dragon_active`
+- `[DWIN-SIG] ...` death-window summary, dumped on close
+- `[DRAWCTX]` per-call detailed context (caller, FVF, render states, tex pointers)
+
 ---
 
-## 7. Diagnostic Findings From Latest Run (UTC 16:53:23 – 16:56:22)
+## 7. Diagnostic Findings
 
-### Frame ↔ UTC mapping (selected)
+The investigation has produced multiple diagnostic runs. Three are documented here — the original reference run, plus the two most informative v3.x runs that established the D3D8 endpoint.
+
+### 7.1 Original reference run (UTC 16:53:23 – 16:56:22, pre-v3.x)
+
+Frame ↔ UTC mapping:
+
 | Frame | UTC | Bruce's narration |
 |-------|-----|-------------------|
 | F00000 | 16:53:23 | Proxy startup |
 | F00516 | 16:53:47 | DWIN false-fired (SHIP/lobby) |
-| F00522 | 16:53:48 | First bone hit on caller `0x0061745A` (lobby) |
 | F01380 | 16:54:24 | Room creation |
 | F02376 | 16:54:57 | First "JUMPf" matrix delta = 1920 |
 | F03420 | 16:55:33 | Dragon arena entered, fight begins |
-| F04646–F04750 | 16:56:12–16:56:18 | Suppress hot zone (manual trigger or death — unannotated by Bruce) |
-| F05744+ | 16:56:22+ | Persistent Matrix A/B alternation continues |
+| F04646–F04750 | 16:56:12–16:56:18 | Suppress hot zone (manual trigger or death) |
+| F05744+ | 16:56:22+ | Persistent matrix alternation continues |
 
-### Critical findings
+**Findings:**
+- DWIN auto-detector was fundamentally broken in v16-lite-r3 (opened on the SHIP, never closed for the entire 3-minute run). Mitigated in v16-lite-r5 by adding `FIGHT_MIN_FRAME = 2700` gate plus dragon entity ptr requirement.
+- 7,389 events on caller `0x0061745A`, ptr `01301910`. Two matrices alternate per frame on same ptr.
+- The matrix dump at the time used `(int)mat[i]` integer truncation, which made small fractional rotations *display* as zero. This led to misleading framing of which matrix was "the bad one" — see Section 3.2.
 
-**Finding 1: DWIN auto-detector was fundamentally broken in v16-lite-r3.**
-- Opened at F00551 (UTC 16:53:49) while Bruce was on the SHIP, 96 seconds before dragon arena.
-- Never closed for the entire 3-minute run.
-- Cause: `is_fight_frame = (sup_uniq >= 3)` fires on lobby effects with multiple textures; auto-close `fsd >= 120` failed because `g_dragon_active=1` was set by *any* boned entity (lobby NPCs, Hilda bears in Forest 2, etc.) using the same call site.
-- **Mitigation in v16-lite-r5:** `FIGHT_MIN_FRAME = 2700` (~90 sec) gates fight-confirm. Plus `g_dragon_active` now requires both call site `0x0061745A` AND ptr `0x01301910` (dragon entity).
-- **Still pending:** add `g_dragon_active` requirement to the FIGHT_SEEN gate itself; replace hard-coded ptr with adaptive capture.
+This run informed the move to `(int)(mat[i]*10000)` dump format and to bone hook v3.x.
 
-**Finding 2: Matrix B is real (visually) but its actual float values are unknown.**
-- 7,389 events on caller `0x0061745A`, ptr `01301910`.
-- Two matrices alternate per frame on same ptr.
-- Matrix A: clean rotation, translation `(67, 2000, 9)`.
-- Matrix B: rotation rows display as `0,0,0`, translation `(46, 25, 49)`.
-- `zero_rot=0` reported throughout — but the predicate uses exact float `== 0.0f` while the dump format uses `(int)`-truncated floats. So Matrix B may be sub-1.0 fractional values that look zero in display.
-- **v16-lite-r5 changes the dump format to `(int)(mat[i]*10000)`** — next run resolves this.
-- `[BONE-DIAG]` periodic samples show live diagonal `[0.894, -0.993, -0.889]` — fractional cosines. Plausible.
+### 7.2 v3.3 — decisive D3D8-layer endpoint confirmation
 
-**Finding 3: Bone caller frequency.**
-| Caller (return address) | Hits |
-|-------------------------|------|
-| `0x0061745A` | 7,389 |
-| `0x0061753A` | 20 |
-| `0x00574C3C` | 17 |
-| `0x004F0C96` | 13 |
+**Hypothesis tested:** That high-Y matrix suppression at the bone hook return would propagate to the GPU and either fix or visibly change the dragon corruption.
 
-**Finding 4: Suppression histogram by 100-frame bucket (UTC mapping in narration column).**
-| Frame range | Count | Game phase |
-|-------------|-------|------------|
-| F0400–499 | 633 | Ship/lobby (shouldn't fire — false positives) |
-| F0500–599 | 188 | Still on ship |
-| F1200–1299 | 12 | Walking around |
-| F2600–2999 | 1,089 | Forest 2 / Hilda bears |
-| F3000–3699 | 720 | Dragon arena entry, fight start |
-| F4600–4799 | 244 | Post-narration (manual trigger or death) |
+**What we instrumented in v3.3:**
+- `[BONE-PRE]` at the top of `hook_bone_fn` — reads `*actual` *before* calling the real bone function, so we can detect whether suppression from the prior frame persisted between calls or whether something restored the matrix.
+- `[BONE-POST]` immediately after the mutation — re-reads `mat[]` and asserts the write actually landed.
+- `[SETXFORM-HIGHY]` in `hook_SetTransform` — fires if any matrix submitted to D3D8 in any state matches the high-Y signature (`ty≈2000`, `mat[0]≈1`, `mat[5]≈0`, `mat[10]≈0`).
 
-Suppression fires throughout the run, including non-dragon contexts. Implies either (a) proxy is silently preventing latent bugs in lobby/forest, or (b) heuristic is over-aggressive. **Untested A/B: disable SUPPRESS-NEAR, keep hard SUPPRESS, see if anything visibly degrades.**
+**Run results:**
+- `[BONE-POST] mutation_took=1` in 100% of samples — our zero-rotation write reaches `*actual` correctly.
+- `[BONE-PRE] matches_pre_high_y=0` in 100% of samples (across 194 entries). Nothing restores the matrix between calls; our suppression "stuck."
+- `[SETXFORM-HIGHY]` count: **0 across the entire run.** `[BONE STAT] setxform_highy_seen_total=0` consistently in every periodic stat dump.
+- `high_y_suppressed_total=1888` — the gate fired ~1888 times during the arena.
+- Visual bug **unchanged or worse** during mid-fight manual trigger and post-death clear-screen. Bruce's eyeballs disagreed with the suppression's mechanical success.
+
+**Conclusion:** The high-Y matrix never reaches D3D8 SetTransform in any state. PSO V2 software-skins the bone matrix on the CPU and writes post-skinned vertices to the VB. Matrix mutation at the bone hook return point is too late — the consumer (CPU vertex transform) has already read `*actual` by the time our hook returns, and the resulting transformed vertices are already in the VB pipeline.
+
+This run closed the D3D8 / proxy-layer fix path for Bug B. See Section 2.6 for the broader implications.
+
+### 7.3 v3.4 — final D3D8 capture (orientation for pso.exe pivot)
+
+**Purpose:** With suppression disabled, capture a complete catalog of Dragon-active draw signatures so that the next phase (pso.exe disassembly) has concrete addresses to anchor on.
+
+**Configuration:**
+- `BONE_SUPPRESS_HIGH_Y=0` (suppression off)
+- All v3.3 diagnostic markers retained (cheap to keep, useful as ongoing baseline)
+- `[DRAGON-SIG]` added — fires once per unique draw signature seen during `g_dragon_active`, capturing: draw type (DP/DIP/UP), caller address, FVF, primitive type, primitive count, vertex stride, tex0 pointer, alphablend/srcblend/destblend, zenable/zwriteenable, lighting, cullmode
+
+**Run results:**
+- `setxform_highy_seen_total=0` (re-confirmed)
+- `high_y_suppressed_total=0`, `suppress=0` in every `[HIGHY-SEEN]` line (confirms suppression-off mode)
+- `128` unique `[DRAGON-SIG]` entries
+- `344` `[DWIN-SIG]` entries (death-window subset)
+- `18576` `[DRAWCTX]` entries (per-call detail during dragon-active)
+
+**Top death-window callers (orientation for pso.exe disassembly):**
+
+| Caller | Hits | Type | Notes |
+|--------|------|------|-------|
+| `0x00637A90` | 196 | DP | Highest. Dominant during dragon body / death rendering |
+| `0x006405E0` | 122 | DP | Already known as XYZRHW particle path. High death-window count is interesting — likely shared with death effects |
+| `0x00639F2A` | 19 | DP | Previously-suspected dragon body draw caller. Lower than expected |
+| `0x0063691F` | 4 | UP | UP traffic is rare. Suggests one-off / overlay element |
+| `0x00637BC0` | 2 | DP | Very low count, likely clear-screen specific |
+| `0x0063694B` | 1 | UP | Single-fire UP. Possible single death-fade quad |
+
+**Visual bug:** unchanged. Mid-fight trigger still works. Death/clear-screen bleed still visible. This run wasn't an attempted fix — it was data capture.
+
+**Conclusion:** D3D8 layer investigation is complete. The catalog above is the orientation material for pso.exe analysis. Each of the six callers above is a candidate for "the function that draws the corrupt component." Identifying which one (or which combination) by reading the disassembly around those addresses is the immediate next task.
 
 ---
 
@@ -383,79 +468,88 @@ Suppression fires throughout the run, including non-dragon contexts. Implies eit
 |----------|--------|
 | Patch `0x00638360` globally to write 0.0f instead of 65535.0f | Broke screen fades and Forest 2 environmental lighting. Reverted. |
 | Use return-address discriminator at `0x006382FE` / `0x00638303` to distinguish fades from particles | Same return address used by both. Cannot disambiguate without vertex/struct context. |
-| Pure identity matrix fallback for Matrix B | Erased translation. Bad component rendered at world origin (0,0,0) instead of dragon's actual position. |
-| Translation-preserving identity fallback | Improved scope; localized artifact remained at correct world position. |
-| Use `g_death_window` as suppression gate for body draws | DWIN was open for the entire 3-minute run — would suppress dragon body during normal fight. |
-| Bone hook `degen` predicate as `(mat[0] == 1.0f && mat[5] == 1.0f && mat[10] == 1.0f)` (v3) | Wrong direction — checks for identity, not zero rotation. Renamed `is_identity` in v16-lite-r5; new `zero_rot` predicate added. |
-| Looking at PSOBB binary for an upstream fix to backport | Sonic Team did not fix the bone matrix code between V2 and BB (Section 2.5). The hunt was useful for validation but did not yield a portable fix. |
+| Pure identity matrix fallback at the matrix guard (Patch C variant) | Erased translation. Bad component rendered at world origin (0,0,0) instead of dragon's actual position. |
+| Translation-preserving identity fallback (rotation diagonals = 1.0f) at Patch C | Improved scope. Localized artifact remained at correct world position because identity rotation still rendered the bad mesh. v5 of `apply_dragon_fix.py` reverted to zero diagonals + NOPed translation slots. |
+| `(int)mat[i]` matrix dump format in `[BONE]` lines | Made small fractional rotation values display as zero, leading to incorrect characterization of which matrix was degenerate. Fixed in v16-lite-r5 with `(int)(mat[i]*10000)`. |
+| Bone hook v3 `degen` predicate as `(mat[0] == 1.0f && mat[5] == 1.0f && mat[10] == 1.0f)` | Wrong direction — checked for identity, not zero rotation. Renamed `is_identity` in v16-lite-r5; new `zero_rot` predicate added. |
+| Use `g_death_window` as a suppression gate for body draws | DWIN was open for the entire 3-minute run in early versions. Would have suppressed dragon body during normal fight. |
+| **High-Y matrix zero-rotation suppression at the bone hook return** (v3.2) | Mutation lands correctly (`mutation_took=1`), nothing restores it (`matches_pre_high_y=0`), but matrix never reaches D3D8 SetTransform (`setxform_highy_seen=0`). PSO V2 is software-skinning. Visual bug entirely unchanged. (Section 7.2.) |
+| **Any matrix-mutation strategy at the D3D8 proxy layer** | Same root cause as the line above. Matrix at `*actual` is consumed by CPU vertex transform code that runs before our hook returns. (Section 2.6.) |
+| Looking at PSOBB binary for an upstream fix to backport | Sonic Team did not fix the bone matrix code between V2 and BB (Section 2.5). Hunt was useful for validation but not a portable fix. |
 
 ---
 
 ## 9. Open Questions
 
-1. **What does Matrix B actually contain in float-precision?** Awaiting v16-lite-r5's `mat(x10k)` dump.
-2. **Is `0x00639F2A` dragon-specific or a generic mesh renderer?** Currently a guess. Need DWIN-SIG with `last_frame` filtered to clear-screen-only window. The `last_frame` field is added in v16-lite-r5; need a clean DWIN open/close cycle to populate it.
-3. **What's the exact RGB of "pink"?** Never sampled. Magenta `#FF00FF` would indicate D3D missing-texture default. PSO-specific pink would indicate intentional damage/death material. Drifting/varied pink would indicate reading from valid-but-wrong texture memory. **Bruce: pixel-sample a screenshot during bug.**
-4. **What's the death-fade overlay's draw signature?** Likely a single fullscreen quad at FVF `0x0144`, alpha-blended. Identifying it gives a precise phase trigger that needs no chat marker.
-5. **Does the dragon entity ptr `0x01301910` stay stable across game launches?** Probably not — heap allocation. Bone hook's hard-coded filter must be made adaptive.
-6. **Which dragon body part triggers the bug visually?** Bruce noted "when a part of the body goes out of frame, the bug stops." Localizing this to a specific bone (head? wing? front-left claw?) would give a per-bone gate, much cleaner than caller+FVF.
-7. **Is the lobby/forest suppression activity preventing latent bugs, or is the heuristic over-aggressive?** A/B test pending.
-8. **Why doesn't BB visibly show dragon corruption despite having identical broken bone matrix code?** Three competing hypotheses (Section 2.5): different inputs to the bone matrix function in BB, downstream NaN/infinity guards in BB's rendering pipeline, or a different dragon model entirely. Each is testable but requires different methodology (dynamic analysis of BB, static analysis of BB's vertex transform code, or asset comparison respectively).
-9. **Does BB's rendering pipeline add NaN/infinity guards downstream of the bone matrix?** If yes, those guards could be ported to V2 as a complementary fix that doesn't depend on the zeroscale assumption holding. Search BB's vertex-skinning and draw-submission code for finite-value checks that don't exist in V2.
-10. **Do the dragon model files differ between V2 and BB?** If BB's dragon has different bone weights or skeleton structure, the degenerate state may not be reachable in BB. This would be testable as a pure asset swap with no code changes — substitute BB's dragon model into V2 and see if the bug becomes unreachable.
-11. **Compare V2 and BB callers of the bone matrix function.** V2 has 7 hooked call sites (Section 5). BB's caller layout might differ. If BB calls the bone matrix function fewer times per frame, or from different code paths, that could explain why BB doesn't reach the degenerate state.
+### Active
+- **Q-A.** Which of the v3.4 draw callers (`0x00637A90`, `0x006405E0`, `0x00639F2A`, `0x0063691F`, `0x00637BC0`, `0x0063694B`) is responsible for rendering the stuck head/neck specifically? Each needs reading in pso.exe.
+- **Q-B.** What is the relationship between the high-Y "ghost" matrix and the visible artifact, given that the matrix doesn't reach the GPU through SetTransform? Three plausible answers:
+   - The high-Y matrix is consumed by software skinning code that produces the *vertex data* eventually rendered in the wrong place. Tracing the consumer would identify which submesh.
+   - The high-Y matrix is read for AI / collision / pick-checking reasons and the visible artifact is unrelated geometric state.
+   - The high-Y matrix is a red herring entirely; it's been correlated to the bug because both stem from the same dragon-arena setup, but the actual rendering path doesn't depend on it.
+- **Q-C.** Bruce noted "when a part of the body goes out of frame, the bug stops." Localizing the specific Dragon body part (head? wing? front-left claw?) that triggers the bug visually would dramatically narrow the search.
+- **Q-D.** What's the exact RGB of "pink"? Magenta (`#FF00FF`) would indicate D3D missing-texture default. PSO-specific pink would indicate intentional damage/death material. Drifting/varied pink would indicate stale texture memory. **Pixel-sample a screenshot during bug.**
+- **Q-E.** What's the death-fade overlay's draw signature? Likely a single fullscreen UP quad — possibly one of the `0x0063691F` / `0x0063694B` UP callers identified in v3.4.
+
+### Resolved by v3.x
+- ~~**Q1 (original).** What does Matrix B actually contain in float-precision?~~ **Answered.** Matrix B (renamed Matrix 2) is the visible Dragon body with full orthonormal rotation, ground-level translation. The "all-zero rotation" framing was a display-truncation artifact. Matrix A (renamed Matrix 1) is the suspicious high-Y ghost at constant `ty=2000` with rotation `[1,0,0 | 0,0,1 | 0,-1,0]`. Section 3.2.
+- ~~**Q5 (original).** Does the dragon entity ptr stay stable across game launches?~~ **Partially answered / resolved as not-an-issue.** The ptr varies across launches; the bone hook now does dynamic capture (first ptr at caller `0x0061745A` with `|ty|>1000` after frame 2700). No hard-coded ptr remains.
+
+### Parked (low priority post-v3.x)
+The BB-derived investigation paths from earlier in the project assumed matrix corruption was the rendering input. v3.x established the rendering input is software-skinned vertex data, not the matrix. The following questions remain open in principle but are de-prioritized — they would each require substantial new methodology to be productive:
+
+- **Why doesn't BB visibly show dragon corruption despite identical broken bone matrix code?** (Section 2.5.) Answering would still require dynamic analysis of BB.
+- **Does BB's rendering pipeline add NaN/infinity guards downstream?** Would need disassembly of BB's vertex transform code.
+- **Do the dragon model files differ between V2 and BB?** Asset comparison; requires familiarity with PSO model formats.
+- **Compare V2 and BB callers of the bone matrix function.** Could be informative but is now an orthogonal direction; the V2 callers are already the focus of pso.exe disassembly.
 
 ---
 
-## 10. Recommended Next Steps (when resuming)
+## 10. Recommended Next Steps (pso.exe phase)
 
-In rough priority order:
+The next phase is static and dynamic analysis of pso.exe machine code, using the v3.4 draw catalog as orientation. The high-leverage targets, in roughly priority order:
 
-### Code fixes before next test run
-1. **Add `g_dragon_active` requirement to FIGHT_SEEN gate** in `hook_Present` DWIN state machine. Currently:
-   ```c
-   if (is_fight_frame && g_frame >= FIGHT_MIN_FRAME) {
-   ```
-   Change to:
-   ```c
-   if (is_fight_frame && g_frame >= FIGHT_MIN_FRAME && g_dragon_active) {
-   ```
-2. **Replace hard-coded ptr `0x01301910` in bone_hook.h** with adaptive capture: lock the first ptr seen from caller `0x0061745A` after frame 2700 as the dragon ptr for the rest of the session.
-3. **Add `is_identity` to BONE log dump format** in `bone_hook_flush()` — currently captured but not printed.
-4. **Cleanup stale comments:** file header `v16-lite-r3` vs DllMain `v16-lite-r5`; `[NEAR_OUTLIER] logged, NOT suppressed` comment in `hook_VBUnlock` is stale (it IS suppressed); chat-marker comment in file header references unimplemented feature.
-5. **Fix `wsprintfA(reason, "JUMP%.0f", delta_max)`** — `wsprintfA` doesn't support `%f`; use `wsprintfA(reason, "JUMP%d", (int)delta_max)`.
+### 10.1 Identify which v3.4 caller produces the stuck head/neck
 
-### Test session 1 (after code fixes)
-1. Bruce launches with v16-lite-r6 (post-fixes).
-2. Bruce types phase markers in chat as game proceeds:
-   - `PRE` — before approaching dragon
-   - `TRIGGER NOW` — when starting to rub dragon body
-   - `STOPPED` — when bug clears (note which body part went off-screen)
-   - `DEAD` — dragon HP zero
-   - `CLEAR` — fade overlay begins
-   - `DONE` — fade ends
-3. Newserv logs the chat with UTC timestamps. Cross-reference with proxy's `[TIME] tick` lines.
-4. Bruce takes a pixel-sampled screenshot during the visible bug.
+Each of the v3.4 death-window callers is a candidate. Read their disassembly with the goal of answering: which of these draws geometry that is positioned by the high-Y matrix (or by the software-skinning path downstream of it)?
 
-### Analysis after test 1
-- Verify Matrix B values from `mat(x10k)` dump. True zero, fractional nonzero, or garbage?
-- Filter DWIN-SIG entries by `last_frame` ≥ start-of-clear-screen. Surviving signatures are candidates for body-draw or fade-overlay identification.
-- Identify dragon body part from Bruce's STOPPED narration.
-- Sample pink RGB from screenshot.
+Specific addresses to read first:
+- `0x00637A90` (highest hit count; primary candidate for body-related draws)
+- `0x0063691F` and `0x0063694B` (UP callers — unusual traffic, possible overlay or special-case quads)
+- `0x00637BC0` (clear-screen-phase caller; could be the death-fade quad)
 
-### After test 1: branch on Matrix B verdict
-- **If `zero_rot=1` fires** → Matrix B is real corruption. Investigate which sub-mesh consumes this matrix; consider patching the matrix-write path to never produce zero rotation.
-- **If matrix is small fractional** → Matrix B is a child bone with small local rotation. Bug B is fully patched; remaining bleed is Bug C territory.
+For each, build the call graph upward to find what data structures the draw consumes, what vertex buffers it submits, and how those vertex buffers are populated.
 
-### Bug C investigation (parallel or after Bug B closes)
-- Try forcing `D3DCLEAR_ZBUFFER` immediately before the suspected body draw. If bleed disappears, Z-pollution is root cause.
-- Explore identifying dragon-specific draws by texture set rather than caller address. Record texture pointers seen during early-fight calm period; they form the "dragon texture set." A draw is "dragon" if it binds a tex0 from that set.
-- Consider memory-scanning for dragon HP via Cheat Engine. PSO PC V2 enemy struct layout is documented in Sylverant/Newserv community sources. One read per Present gives a precise alive/dead bit and replaces all the heuristic detection with ground truth.
+### 10.2 Trace the consumer of `*actual` at `0x61EA00`
 
-### BB-derived investigation paths (lower priority, higher novelty)
-- **Hunt for downstream finite-value guards in BB's vertex pipeline.** If BB checks for NaN/infinity in vertex transform output before drawing, that check could be ported to V2 as a complementary fix. Static analysis of BB's draw-submission code path is the starting point.
-- **Compare bone-matrix caller layouts between V2 and BB.** If BB has fewer or different callers, that points at the "different inputs" hypothesis (Section 2.5) and shifts the investigation upstream of `0x0061EA00`.
-- **Asset comparison: V2 dragon model vs BB dragon model.** If they differ, attempt a swap to test whether the bug is data-driven rather than code-driven. This requires familiarity with PSO model formats (NJ/NJM or similar Sega formats).
+Disassemble around the call sites of `0x61EA00`, particularly `0x00617455` (the Dragon-primary caller). The instructions immediately after the CALL are the consumer — they read the matrix from `*actual` (or copy from it) and use it for something. That "something" is the software-skinning code we've been blind to throughout the D3D8 phase.
+
+Goal: identify the code that reads the matrix, applies it to vertex data, and writes the result. Once that code is identified:
+- We can patch it to detect when the high-Y signature is present and either skip the work or write a "collapse" output, providing a real upstream fix rather than the proxy mutation that didn't reach the GPU.
+- Alternatively, we can patch the call to `0x61EA00` itself to short-circuit when the input state would produce the high-Y matrix.
+
+### 10.3 Find the per-frame logic that decides Matrix 1 vs Matrix 2
+
+The bone function at `0x0061EA00` is called twice per frame on the same ptr at the same call site (`0x00617455` → returns to `0x0061745A`), producing two genuinely different matrices. Something at the call site (or in the entity state passed to the function) determines which output. Find that decision point. Once identified:
+- If a state flag controls the alternation, suppress that flag for whichever invocation produces Matrix 1.
+- If two genuinely different entities are sharing the same memory location (the alternation is two distinct entities being processed sequentially), find the second entity and either prevent its existence or its rendering.
+
+### 10.4 Tooling and methodology for this phase
+
+- **Ghidra (free) for primary disassembly.** PSO PC V2 is 32-bit PE, no obfuscation, identifies as MSVC 6 build. Ghidra's decompiler is good enough on this generation of code to give pseudo-C output that's mostly readable.
+- **Cheat Engine for runtime memory inspection.** Find the dragon entity struct, read its layout, map fields back to function arguments seen in disassembly.
+- **Existing D3D8 proxy as a runtime probe.** The bone hook can be modified to log additional state at any entry point we want to instrument. Extending it for new diagnostic markers is cheap.
+- **Community resources.** Schtserv, Ephinea, Sylverant, and Newserv all have GitHub orgs with PSO reverse-engineering notes. Worth a `site:github.com bm_boss1_dragon`-style search before from-scratch reading. Someone may have already mapped these functions even if they didn't ship a fix.
+
+### 10.5 Memory-scan for dragon HP / state
+
+PSO PC V2 enemy struct layout is documented in Sylverant/Newserv community sources. A direct memory read per Present can replace heuristic detection of dragon-alive / dragon-dying state with ground truth. This would clean up the DWIN state machine substantially and give exact phase markers without depending on chat.
+
+### 10.6 Bug C parallel investigation
+
+Independent of the high-Y matrix work:
+- Force a `D3DCLEAR_ZBUFFER` immediately before suspected body-draw callers. If the clear-screen bleed disappears, Z-pollution is the root cause.
+- Identify draws by texture set rather than caller address. Record texture pointers seen during early-fight calm period; they form the "dragon texture set." A draw is "dragon" if it binds a tex0 from that set.
 
 ---
 
@@ -465,6 +559,13 @@ In rough priority order:
 ```
 i686-w64-mingw32-gcc -shared -O2 -o D3D8.dll d3d8_widescreen.c d3d8.def \
     -lkernel32 -Wl,--enable-stdcall-fixup
+```
+
+### Apply the binary patches
+```
+python3 apply_dragon_fix.py pso.exe          # apply (creates pso.exe.original backup)
+python3 apply_dragon_fix.py pso.exe --verify # check state
+python3 apply_dragon_fix.py pso.exe --revert # restore from backup
 ```
 
 ### Config file (`widescreen_res.cfg`)
@@ -487,7 +588,7 @@ MaxUPLogsPerFrame=5
 The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dll")`.
 
 ### Log output
-`pso-peeps-d3d8-wsh.log` in pso.exe's working directory. Wiped on each launch.
+`pso-peeps-d3d8-wsh.log` in pso.exe's working directory. Wiped on each launch via `CREATE_ALWAYS`.
 
 ---
 
@@ -495,18 +596,19 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 
 | File | Version | Notes |
 |------|---------|-------|
-| `d3d8_widescreen.c` | v16-lite-r5 | File comment header still says v16-lite-r3 — update on next edit. Includes `last_frame` in DrawSig16, `FIGHT_MIN_FRAME=2700` gate. |
-| `bone_hook.h` | v3 + v16-lite-r5 fixes | `zero_rot` predicate added. Matrix dump uses `(int)(mat[i]*10000)`. Dragon-active filter requires both caller `0x0061745A` AND ptr `0x01301910` (hard-coded — make adaptive). `[BONE-DIAG]` periodic dump every 60 frames. |
-| `pso.exe` | Patched | Three binary patches applied. Diff vs `pso_exe.original` = 88 byte differences across three regions. |
-| `pso_exe.original` | Original | Reference for diff verification. |
+| `d3d8_widescreen.c` | v16-lite-r9-v3.4 | Hooks SetTransform with high-Y detector, dragon-active draw correlation, Bug A particle suppression. No active suppression of bone matrices (proxy-layer matrix fix path closed). |
+| `bone_hook.h` | v3.4 | `BONE_SUPPRESS_HIGH_Y=0` default. `[BONE-PRE]`, `[BONE-POST]`, `[BONE-XYZ]`, `[HIGHY-SEEN]`, `[BONE-DIAG]`, `[BONE-PTR]`, `[BONE STAT]` markers active. Dynamic Dragon ptr capture. |
+| `apply_dragon_fix.py` | v5 | Four patches: A (fcomps redirect), B (je→jbe), C (16-write fallback as zero rotation + NOPed translation + 1.0 w), D (near-z scale 65535→0). |
+| `pso.exe` | Patched per `apply_dragon_fix.py v5` | Verify with `apply_dragon_fix.py pso.exe --verify`. |
+| `pso.exe.original` | Original | Reference for diff verification. Auto-created by `apply_dragon_fix.py` on first apply. |
 
 ---
 
 ## 13. Tooling References
 
-- **Disassembly:** Ghidra (free) or IDA Pro. PSO PC V2 is 32-bit PE, no obfuscation, identifies as MSVC 6 build. PSOBB is similarly 32-bit PE, with additional packed/protected sections for online security but the dragon-relevant code lives in plain `.text`.
+- **Disassembly:** Ghidra (free) or IDA Pro. PSO PC V2 is 32-bit PE, no obfuscation, identifies as MSVC 6 build. PSOBB is similarly 32-bit PE with additional packed/protected sections for online security; the dragon-relevant code lives in plain `.text`.
 - **Memory inspection:** Cheat Engine for finding dragon HP / entity struct addresses.
-- **Binary patching:** Direct hex editor (HxD) for static patches; runtime patches via `VirtualProtect` + `memcpy` in proxy DllMain or hook_CreateDevice.
+- **Binary patching:** `apply_dragon_fix.py` for the four current patches; HxD for ad-hoc inspection; runtime patches via `VirtualProtect` + `memcpy` in proxy DllMain or hook_CreateDevice.
 - **D3D8 reference:** `IDirect3DDevice8` vtable layout — slot numbers in proxy patches are MSDN-documented but easy to drift; verify with dgvoodoo source.
 - **Wine config:** Bruce runs on Wine. Proxy must work both native Windows and Wine.
 - **Server-side correlation:** Newserv logs UTC. Proxy logs both UTC and LOCAL (Bruce is EDT). Phase markers via in-game chat appear in newserv log with UTC timestamps; align manually with proxy `[TIME] tick` lines.
@@ -516,12 +618,14 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 
 ## 14. Investigation Methodology Notes
 
-- **Three-way collaboration:** Bruce (drives, runs tests, narrates), Sonnet (writes proxy code, does most implementation), GPT (reviews logs, sanity-checks hypotheses, frames investigation), Opus (architecture-level review on demand).
+- **Three-way collaboration:** Bruce (drives, runs tests, narrates), Sonnet (writes proxy code), GPT (reviews logs, sanity-checks hypotheses, frames investigation), Opus (architecture-level review on demand).
 - **Pitfall observed:** AI-generated detectors can be confidently wrong in ways that produce clean-looking-but-meaningless logs. The bone_hook v3 `degen` predicate checked for identity rotation when the actual bug was zero rotation — and produced "all clear" output that was misleading until reviewed. *Always check whether the detector can even see the thing it's supposed to detect.*
-- **Pitfall observed:** Display formatting can lie. The original `(int)mat[i]` matrix dump made non-zero-but-small floats look exactly like zero. Whenever a hypothesis depends on a value being precisely zero (or precisely something), use a format that distinguishes.
+- **Pitfall observed:** Display formatting can lie. The original `(int)mat[i]` matrix dump made non-zero-but-small floats look exactly like zero, leading to a multi-week mischaracterization of which matrix was degenerate (Section 3.2). Whenever a hypothesis depends on a value being precisely zero (or precisely something), use a format that distinguishes.
+- **Pitfall observed (v3.x):** A working mechanical mutation does not imply a reachable mutation. v3.2's high-Y suppression fired correctly 1888 times, with `mutation_took=1` confirmed in v3.3. The bug was unchanged because the consumer of `*actual` is software-skinning code that runs before our hook's mutation completes. *Before assuming a runtime hook can fix something, instrument the consumer side as well as the producer side.*
+- **Pitfall observed (v3.x):** Coincidence is not causation. The high-Y matrix is suspicious (constant ty=2000, perfect alternation, single static rotation signature) but suppressing it had zero visible effect. Suspicious signals are correlations until proven causal. The methodology to verify causality at runtime is to instrument the consumer of the suspect data, not just the producer.
 - **Test cycle cost:** Each diagnostic run is ~15 minutes setup + 5 minutes gameplay + 30+ minutes log analysis. Iteration is expensive. Code review before run > extra runs.
 - **Bug families:** Decomposition is mandatory. "The dragon bug" is at least three bugs. Treating it as one was probably why prior community attempts didn't progress.
-- **Cross-version binary comparison is high-yield.** Comparing V2 against PSOBB took a few hours of static analysis and produced unambiguous validation that the bone matrix bug is real and unfixed upstream (Section 2.5). When investigating long-standing bugs in old games, compare against successor versions: same engine, possibly fixed bugs, possibly not. Either outcome — fix found or fix absent — is informative. The methodology is straightforward: identify a unique byte pattern in the original (constants, opcode sequences, distinctive control flow), search for the same pattern in the successor, and compare structures around hits.
+- **Cross-version binary comparison is high-yield as validation.** Comparing V2 against PSOBB took a few hours of static analysis and produced unambiguous validation that the bone matrix bug is real and unaddressed by Sonic Team. When investigating long-standing bugs in old games, compare against successor versions: same engine, possibly fixed bugs, possibly not. Either outcome — fix found or fix absent — is informative. The methodology is straightforward: identify a unique byte pattern in the original (constants, opcode sequences, distinctive control flow), search for the same pattern in the successor, and compare structures around hits.
 
 ---
 
@@ -529,40 +633,47 @@ The proxy's `Direct3DCreate8` export forwards to `LoadLibraryA("D3D8_dgvoodoo.dl
 
 | Outcome | Likelihood | Estimated additional hours |
 |---------|------------|---------------------------|
-| Reduced visible severity beyond current | ~85% | 10–20 |
-| "Patch-server ready" — bug rare and mild | 60–70% | 30–50 |
-| Complete elimination of all visual artifacts | 30–40% | 60–100+ |
+| Reduced visible severity beyond current | ~80% | 15–30 |
+| "Patch-server ready" — bug rare and mild | 50–65% | 40–80 |
+| Complete elimination of all visual artifacts | 25–40% | 80–150+ |
 
-Investigation has reached the steepest part of the value curve: harness is built, decomposition is done, three patches landed, diagnostics produce signal, and cross-version verification confirms the bugs are real and unaddressed by Sonic Team. Marginal hours from here are far more productive than the early hours.
+Investigation has reached the steepest part of the value curve. Diagnostic harness is mature. Decomposition is done. Four binary patches landed. The D3D8 path is now closed — that's a *narrowing* of the search space, not a setback. The remaining hours are concentrated on pso.exe disassembly with concrete addresses to anchor on (Section 5, Section 7.3). Ranges above are wider than prior estimates because pso.exe analysis depth varies more than D3D8 instrumentation depth did.
 
 ---
 
 ## 16. Pickup Notes for Resuming
 
-When you (or the next investigator) resume:
+When resuming:
 
-1. **Start by reading this document.** It encodes everything known to date, including the cross-version comparison in Section 2.5 — read that early; it sets the strategic frame for everything else.
-2. **Re-read your existing logs** — `pso-peeps-d3d8-wsh.log` from the most recent run, and any newserv chat log from the same session.
-3. **Apply the v16-lite-r6 code fixes** listed in Section 10 before any new test.
-4. **Run one diagnostic session with phase markers** (Bruce types in chat).
-5. **Branch on Matrix B verdict** as described in Section 10.
-6. **Don't trust DWIN as a phase gate** until the FIGHT_SEEN guard includes `g_dragon_active`.
-7. **Don't expect BB to provide a fix.** Section 2.5 concludes that BB has the same broken code. BB is useful for additional investigation paths (downstream guards, caller layout, asset comparison) but not as a source of patches to backport.
+1. **Read this document end-to-end first.** Sections 2.5 and 2.6 set the strategic frame: BB has the same broken code (no fix to backport), and the D3D8 / proxy layer cannot reach the rendering pipeline that produces the visible artifact (software skinning).
+2. **Verify pso.exe patches are still applied:** `python3 apply_dragon_fix.py pso.exe --verify`. Should report `STATE: fully patched`.
+3. **Verify proxy build works:** rebuild `D3D8.dll` from `d3d8_widescreen.c` and `bone_hook.h` v3.4 with the build command in Section 11. Run a quick game launch and confirm `[F00000] [BONE] hook v3.4 installed` appears in `pso-peeps-d3d8-wsh.log`.
+4. **The next phase is pso.exe disassembly.** Open pso.exe in Ghidra. Anchor addresses in Section 5 ("Dragon-active draw callers (v3.4 catalog)") and Section 10. Start with `0x00637A90` (highest hit count) or `0x00617455` (the Dragon-primary bone caller) depending on which question feels more tractable.
+5. **Don't expect BB to provide a fix.** BB-derived investigation paths are parked (Section 9). Useful for additional context if later phases want it.
+6. **Don't try further matrix-mutation strategies at the D3D8 layer.** Section 2.6 documents why this path is closed. Save those engineer-hours for code analysis.
 
 ---
 
 ## 17. Definitions / Glossary
 
-- **Bug A / B / C** — the three identified bug families (see Section 3).
+- **Bug A / B / C** — the three identified bug families (Section 3).
 - **DWIN** — "Death WINdow" state machine in proxy. Currently misnamed; actually detects "dragon outlier window." Renaming pending.
-- **Matrix A / Matrix B** — two genuinely different bone matrices computed per frame on the same ptr. Names are local convention to this investigation.
-- **FVF** — D3D8 Flexible Vertex Format. `0x0144` = XYZRHW + diffuse + 1 tex coord set. `0x0142` = XYZ + diffuse + 1 tex coord set.
+- **Matrix 1 / Matrix 2** — the two bone matrices that alternate per frame on the same ptr. Matrix 1 = high-Y ghost (`ty=2000`, rotation `[1,0,0 | 0,0,1 | 0,-1,0]`). Matrix 2 = visible Dragon body. Earlier versions of this document called these "Matrix A / Matrix B"; the new naming clarifies which one is suspicious. (Section 3.2.)
+- **Matrix A / Matrix B** — deprecated names for Matrix 1 / Matrix 2. See note above.
+- **High-Y / normal-Y** — the two equivalence classes the v3.x extractor sorted matrices into. High-Y has `|ty| > 1000` (always exactly 2000.0 in observed runs). Normal-Y is the visible-body class.
+- **Software skinning** — CPU-side vertex transform. The bone matrix is consumed by CPU code that produces final-positioned vertices and writes them into a vertex buffer. D3D8 only sees post-skinned positions, never the bone matrix. PSO V2 inherits this convention from its Dreamcast predecessor.
+- **H1 / H2 / H3** — the three hypotheses considered for "why doesn't matrix suppression fix the bug" in v3.3. H1 = mutation reaches GPU, but high-Y matrix isn't responsible for the visible artifact. H2 = mutation never reaches GPU because PSO is software-skinning. H3 = something restores the matrix between hook fires. v3.3 confirmed H2.
+- **FVF** — D3D8 Flexible Vertex Format. `0x0144` = XYZRHW + diffuse + 1 tex coord set. `0x0142` = XYZ + diffuse + 1 tex coord set. `0x0112` = XYZ + diffuse + 1 tex coord set with a different layout.
 - **XYZRHW** — pre-transformed vertex format (already in screen space, perspective divide already applied). Bypasses GPU vertex pipeline.
 - **dgvoodoo** — D3D8/9-to-modern-API wrapper used as the actual D3D8 implementation. Proxy forwards real calls to `D3D8_dgvoodoo.dll`.
-- **`[SUPPRESS]` / `[SUPPRESS-NEAR]`** — log tags for proxy suppression actions on outlier vertex buffer quads.
-- **`[BONE]` / `[BONE-DIAG]`** — bone hook log tags. `[BONE]` is event-driven on suspicious matrices; `[BONE-DIAG]` is periodic sampling.
+- **`[SUPPRESS]` / `[SUPPRESS-NEAR]`** — log tags for proxy suppression actions on outlier vertex buffer quads (Bug A).
+- **`[BONE]` / `[BONE-DIAG]` / `[BONE-PRE]` / `[BONE-POST]` / `[BONE-XYZ]` / `[BONE-PTR]`** — bone hook log tags. See Section 6 for which fires when.
+- **`[HIGHY-SUP]` / `[HIGHY-SEEN]`** — high-Y matrix events. `SUP` fires when suppression is on (v3.2/v3.3), `SEEN` when off (v3.4). First 10 of each include full detail.
+- **`[SETXFORM-HIGHY]`** — fires if any matrix submitted to D3D8 SetTransform matches the high-Y signature. **Always 0** across all observed Dragon arena runs — the decisive evidence that PSO V2 is software-skinning.
+- **`[DRAGON-SIG]`** — fires once per unique draw signature observed during `g_dragon_active`. v3.4 catalog.
 - **`[DWIN-SIG]`** — draw signature accumulated during the death window, dumped on window close.
-- **Caller / return address** — in this doc, `caller` usually means `__builtin_return_address(0)` — the address in pso.exe immediately after the CALL instruction. This is the address logged as `caller0=...` in proxy output.
+- **`[DRAWCTX]`** — full per-call draw context (caller, FVF, render states, tex pointers).
+- **Caller / return address** — in this doc, `caller` usually means `__builtin_return_address(0)` — the address in pso.exe immediately after the CALL instruction. This is the address logged as `caller=...` or `caller0=...` in proxy output.
 - **V2 vs BB** — V2 = Phantasy Star Online PC Version 2 (this investigation's target). BB = Phantasy Star Online Blue Burst (the next-generation client, used in Section 2.5 for cross-version verification).
 
 ---
