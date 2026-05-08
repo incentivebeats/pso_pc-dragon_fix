@@ -473,7 +473,8 @@ This run closed the D3D8 / proxy-layer fix path for Bug B. See Section 2.6 for t
 ---
 
 ## 8. Failed Approaches (do not repeat)
-
+<img width="1698" height="900" alt="image" src="https://github.com/user-attachments/assets/4f779ca4-c22f-4f86-94de-4112daf489f1" />  
+  
 | Approach | Result |
 |----------|--------|
 | Patch `0x00638360` globally to write 0.0f instead of 65535.0f | Broke screen fades and Forest 2 environmental lighting. Reverted. |
