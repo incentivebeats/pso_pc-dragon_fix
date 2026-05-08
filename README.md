@@ -219,6 +219,7 @@ BB-derived investigation paths are now parked unless someone wants to answer a d
 ---
 
 ## 2.6 D3D8 matrix-mutation endpoint
+<img width="1698" height="900" alt="Screenshot From 2026-05-08 09-43-39" src="https://github.com/user-attachments/assets/93b3babb-aaae-456f-a365-1d346d23c08e" />
 
 **Conclusion:** The D3D8 proxy layer cannot deliver a structural fix for the bone-matrix side of the Dragon corruption by mutating matrices after the bone-hook return point. The mutation is mechanically correct, but the renderer never reads from that path.
 
