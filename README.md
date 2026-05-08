@@ -2,8 +2,6 @@
 
 Disclaimer: Work done here was done together with LLMs. The below report is an analysis derived from collaboration between Bruce, GPT, Claude Sonnet, and Claude Opus.
 
-If anyone with experience wants to poke around or see if anything discovered below is helpful to finding a solution before me, please feel free.
-
 **Status:** D3D8 matrix-mutation / proxy-layer fix path closed as a structural fix path; proxy retained for Bug A mitigation and diagnostics. pso.exe machine-code analysis/patching is the active phase.  
 **Target:** Phantasy Star Online PC V2 client  
 **Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning path strongly indicated by diagnostics; pso.exe disassembly is the next phase.  
