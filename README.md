@@ -12,7 +12,7 @@
 - D3D8 proxy: `v16-lite-r9-v3.4`.
 - `bone_hook.h`: v3.4.
 - `BONE_SUPPRESS_HIGH_Y=0` for the final v3.4 diagnostic run.
-- Widescreen mode under test: 14:9 viewport/bars.
+- Widescreen mode under test: 14:9 viewport/bars, 16:9 introduces too much culling  
 
 
 > **Note for the impatient reader (revised post-v3.4):** Two structural conclusions now stand:
