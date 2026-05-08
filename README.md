@@ -327,13 +327,12 @@ bm_boss1_dragon_a.bml
 The `_b` file is not junk. It is a real PC V2 Dragon BML family package with different flags, a different main model name, much larger embedded data, and an explicit reference in both original and patched `pso.exe`.
 
 ### pso.exe selector discovery
-
 The string `bm_boss1_dragon_b.bml` has a single xref at:
 
 ```text
 0x00420328
 ```
-
+<img width="1528" height="928" alt="02_ghidra_dragon_bml_string_xref" src="https://github.com/user-attachments/assets/135e507d-e17e-49ed-9669-53baf59917f2" />  
 This is inside Dragon BML selection logic around:
 
 ```text
@@ -341,7 +340,6 @@ This is inside Dragon BML selection logic around:
 ```
 
 Observed control flow:
-
 ```asm
 00420317  PUSH 0x08000000
 0042031c  CALL FUN_00566c20
@@ -377,12 +375,14 @@ With `param_2 == 0`, this checks:
 CTRLFLAG0 & 0x08000000
 ```
 
+<img width="1628" height="940" alt="03_ghidra_ctrlflag0_bitmask_check" src="https://github.com/user-attachments/assets/957184d7-16df-4ea4-89f1-8e24c4711a0c" />
+
 ### Registry source
 
-`DAT_007b8ce0` is initialized from the registry:
+`` is initialized from the registry:
 
 ```text
-FUN_0063FD30("CTRLFLAG0", &DAT_007b8ce0)
+FUN_0063FD30("CTRLFLAG0", &)
 FUN_0063FD30("CTRLFLAG1", &DAT_007b8ce4)
 FUN_0063FD30("CTRLFLAG2", &DAT_007b8ce8)
 FUN_0063FD30("CTRLFLAG3", &DAT_007b8cec)
@@ -666,7 +666,7 @@ PE image base: `0x00400000`
 | `0x00496230` | Earlier special-condition gate; returns true if `DAT_00691e40 != 0 && DAT_006f7b04 == 3` |
 | `0x00566c20` | Wrapper for flag check |
 | `0x0061BE10` | Wrapper to `0x006402F0` |
-| `0x006402F0` | Generic control-flag bit test: checks `param_1 & (&DAT_007b8ce0)[param_2]` |
+| `0x006402F0` | Generic control-flag bit test: checks `param_1 & (&)[param_2]` |
 | `0x007b8ce0` | Runtime storage for `CTRLFLAG0` |
 | `0x007b8ce4` | Runtime storage for `CTRLFLAG1` |
 | `0x007b8ce8` | Runtime storage for `CTRLFLAG2` |
@@ -806,7 +806,7 @@ Ghidra was used to:
    - `FUN_00566c20`
    - `FUN_0061BE10`
    - `FUN_006402F0`
-5. Identify `DAT_007b8ce0` as `CTRLFLAG0`.
+5. Identify `` as `CTRLFLAG0`.
 6. Follow registry initialization through `FUN_0063FD30`.
 7. Identify the registry path:
    - `HKEY_CURRENT_USER`
