@@ -5,7 +5,6 @@ Disclaimer: This report was prepared by me using LLMs as research, drafting, rev
 **Status:** D3D8 matrix-mutation / proxy-layer fix path closed as a structural fix path; proxy retained for Bug A mitigation and diagnostics. pso.exe machine-code analysis/patching is the active phase.  
 **Target:** Phantasy Star Online PC V2 client  
 **Last updated:** Post-v3.4 D3D8 diagnostic completion. Software-skinning path strongly indicated by diagnostics; pso.exe disassembly is the next phase.  
-**Investigation lead:** Bruce. LLMs were used as supporting tools for drafting, review, code iteration, and hypothesis checking.  
 
 **Current tested baseline:**
 - `pso.exe` patched with `apply_dragon_fix.py` v5, with patches A/B/C/D applied.
