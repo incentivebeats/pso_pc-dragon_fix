@@ -490,7 +490,8 @@ This run closed the D3D8 / proxy-layer fix path for Bug B. See Section 2.6 for t
 ---
 
 ## 9. Open Questions
-
+<img width="3833" height="2160" alt="Screenshot From 2026-05-07 19-19-30" src="https://github.com/user-attachments/assets/7f2dc88d-238f-4c9b-b5f0-854c0e9b2f74" />  
+  
 ### Active
 - **Q-A.** Which of the v3.4 draw callers (`0x00637A90`, `0x006405E0`, `0x00639F2A`, `0x0063691F`, `0x00637BC0`, `0x0063694B`) is responsible for rendering the stuck head/neck specifically? Each needs reading in pso.exe.
 - **Q-B.** What is the relationship between the high-Y "ghost" matrix and the visible artifact, given that the matrix doesn't reach the GPU through SetTransform? Three plausible answers:
