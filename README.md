@@ -1010,38 +1010,7 @@ The visible Dragon bug is fixed in the current baseline. Remaining work is packa
 
 ---
 
-## 16. Pickup notes for resuming
-
-When resuming:
-
-1. **Verify the registry value first:**
-
-   ```bash
-   export WINEPREFIX="<WINEPREFIX>"
-   wine reg query 'HKCU\Software\SonicTeam\PSOV2'
-   ```
-
-   Known-good: `CTRLFLAG0 = 0x000b0004`.
-
-2. **If the bug returns, immediately check whether `CTRLFLAG0` has regained bit `0x08000000`.**
-
-3. **Do not resume from the old assumption that the next phase is pso.exe draw-call disassembly.** That was correct before the registry selector discovery, but the current active path is packaging and validating the `CTRLFLAG0` fix.
-
-4. **Do not do more D3D8 matrix-mutation tests for this bug.** That path is closed.
-
-5. **If deeper explanation is desired, start at `0x004202f0` in Ghidra, not at the v3.4 draw callers.** The Dragon asset selector is now the primary code object.
-
-6. **Preserve both values for regression testing:**
-   - Known-good: `0x000b0004`
-   - Bug-triggering: `0x080b0004`
-
-7. **For public documentation, phrase the fix carefully:**
-   - Strong claim: clearing `CTRLFLAG0 & 0x08000000` fixed the Dragon corruption in repeated tests on the current baseline.
-   - Do not yet claim: the registry fix alone fixes every possible PC V2 install under every renderer without further testing.
-
----
-
-## 17. Definitions / glossary
+## 16. Definitions / glossary
 
 - **`CTRLFLAG0`** — Registry DWORD under `HKCU\Software\SonicTeam\PSOV2`. Loaded into runtime global `DAT_007b8ce0`.
 - **`0x08000000` bit** — Control flag bit that causes pso.exe to select `bm_boss1_dragon_b.bml`.
