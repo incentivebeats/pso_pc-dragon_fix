@@ -6,7 +6,7 @@
 
 **Status:** Working fix found and repeatedly validated in-game. The visible PC V2 Forest 2 Dragon corruption disappears when the client is prevented from selecting the PC-only `bm_boss1_dragon_b.bml` asset path by clearing bit `0x08000000` from `HKCU\Software\SonicTeam\PSOV2\CTRLFLAG0`.  
 
-You can view a video of the fix in action on YouTube: [https://www.youtube.com/watch?v=f0zYbOgzOKQ](https://www.youtube.com/watch?v=f0zYbOgzOKQ){target="_blank"}
+You can view a video of the fix in action on YouTube: [https://www.youtube.com/watch?v=f0zYbOgzOKQ](https://www.youtube.com/watch?v=f0zYbOgzOKQ)
 
 **Target:** Phantasy Star Online PC V2 client  
 **Last updated:** Post-root-cause registry / asset selector discovery.
