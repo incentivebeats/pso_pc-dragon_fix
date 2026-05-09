@@ -2,7 +2,7 @@
 
 <img width="1698" height="900" alt="image" src="https://github.com/user-attachments/assets/85e2ea75-bae6-4baa-a399-07e12e43d87e" />
 
-**Disclaimer:** This report was prepared by me using LLMs (Sonnet, Opus, and ChatGPT) as research, drafting, review, and code-analysis assistants. I directed the investigation, ran the tests, validated results, and made the technical decisions. My intent was to either figure out a way to get this patched on my own, or have enough information archived that someone else with deeper knowledge can utilize this in the future- but it seems there is a simple, working fix now.
+**Disclaimer:** This report was prepared by me using LLMs (Sonnet, Opus, and ChatGPT) as research, drafting, review, code-generation and code-analysis assistants. I directed the investigation, ran the tests, validated results, and made the technical decisions. My intent was to either figure out a way to get this patched on my own, or have enough information archived that someone else with deeper knowledge can utilize this in the future- but it seems there is a simple, working fix now.
 
 **Status:** Working fix found and repeatedly validated in-game. The visible PC V2 Forest 2 Dragon corruption disappears when the client is prevented from selecting the PC-only `bm_boss1_dragon_b.bml` asset path by clearing bit `0x08000000` from `HKCU\Software\SonicTeam\PSOV2\CTRLFLAG0`.  
 
